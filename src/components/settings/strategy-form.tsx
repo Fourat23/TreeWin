@@ -19,13 +19,13 @@ import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { Field, Input, Select } from "@/components/ui/field";
 import { PROFILE_COLOR_VAR, PROFILE_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/cn";
-import { resetSettingsAction, saveSettingsAction } from "@/server/actions/data-actions";
+import { resetSettingsAction, saveSettingsAction } from "@/server/actions/workspace-actions";
 import { ScaledInput, type Scale } from "./scaled-input";
 
 const TRIGGER_LABEL: Record<(typeof P1_TRIGGERS)[number], string> = {
-  TARGET_PATH: "Capital ≥ value after N wins at target odds",
-  CAPITAL_MULTIPLE: "Capital ≥ S × multiple",
-  WIN_COUNT: "After N winning rounds",
+  CAPITAL_MULTIPLE: "Capital ≥ S × multiple (V1 default: 2.80 × S)",
+  TARGET_PATH: "Alternative — capital ≥ value after N wins at target odds",
+  WIN_COUNT: "Alternative — after N winning rounds",
 };
 
 const ASSIGNMENT_LABEL: Record<(typeof CHILD_PROFILE_ASSIGNMENTS)[number], string> = {
@@ -38,7 +38,7 @@ type Issues = Record<string, string>;
 
 export function StrategyForm({ initial }: { initial: StrategySettings }) {
   const f = useFormat();
-  const { notifyMutation } = useUi();
+  const { notifyMutation, workspace } = useUi();
   const [draft, setDraft] = useState<StrategySettings>(initial);
   const [formKey, setFormKey] = useState(0);
   const [issues, setIssues] = useState<Issues>({});
@@ -56,7 +56,7 @@ export function StrategyForm({ initial }: { initial: StrategySettings }) {
 
   function save() {
     startTransition(async () => {
-      const result = await saveSettingsAction(draft);
+      const result = await saveSettingsAction(workspace, draft);
       if (!result.ok) {
         const list =
           (result.details?.issues as { path: string; message: string }[] | undefined) ?? [];
@@ -65,8 +65,10 @@ export function StrategyForm({ initial }: { initial: StrategySettings }) {
         return;
       }
       setIssues({});
-      toast.success("Strategy settings saved", {
-        description: "Applies to every future evaluation. Caps of existing branches are unchanged.",
+      toast.success(`Strategy settings saved (${workspace})`, {
+        description: result.data.strategyChanged
+          ? "Strategy rules changed: new branches and tickets record the new strategy revision. Existing history is never reinterpreted."
+          : "Display / storage preferences only — the strategy revision is unchanged.",
       });
       notifyMutation();
     });
@@ -74,7 +76,7 @@ export function StrategyForm({ initial }: { initial: StrategySettings }) {
 
   function reset() {
     startTransition(async () => {
-      const result = await resetSettingsAction();
+      const result = await resetSettingsAction(workspace);
       if (result.ok) {
         toast.success("Defaults restored");
         notifyMutation();
@@ -256,7 +258,7 @@ export function StrategyForm({ initial }: { initial: StrategySettings }) {
                   <ProfileLabel profile={p} />
                   <span className="num text-xs text-fg-subtle">{sequence} …</span>
                 </p>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
                   {num(
                     "First threshold (× S)",
                     `profiles.${p}.firstThresholdBp`,
@@ -287,6 +289,21 @@ export function StrategyForm({ initial }: { initial: StrategySettings }) {
                     `keeps ${f.pct(keep, 0)}`,
                   )}
                   {num("Cap", `profiles.${p}.capCents`, "money", rules.capCents, set("capCents"))}
+                  {num(
+                    "Odds corridor min",
+                    `profiles.${p}.oddsTargetMinBp`,
+                    "odds",
+                    rules.oddsTargetMinBp,
+                    set("oddsTargetMinBp"),
+                    "informational",
+                  )}
+                  {num(
+                    "Odds corridor max",
+                    `profiles.${p}.oddsTargetMaxBp`,
+                    "odds",
+                    rules.oddsTargetMaxBp,
+                    set("oddsTargetMaxBp"),
+                  )}
                 </div>
                 {issues[`profiles.${p}`] ? (
                   <p className="mt-2 text-xs text-critical">{issues[`profiles.${p}`]}</p>
@@ -318,11 +335,21 @@ export function StrategyForm({ initial }: { initial: StrategySettings }) {
       <Card>
         <CardHeader title="Tickets & protections" />
         <CardBody className="grid gap-4 sm:grid-cols-3">
-          {num("Protocol odds min", "odds.minBp", "odds", draft.odds.minBp, (v) =>
-            patch((d) => ((d.odds.minBp = v ?? d.odds.minBp), d)),
+          {num(
+            "Protocol odds min",
+            "odds.minBp",
+            "odds",
+            draft.odds.minBp,
+            (v) => patch((d) => ((d.odds.minBp = v ?? d.odds.minBp), d)),
+            "Below: warning only",
           )}
-          {num("Protocol odds max", "odds.maxBp", "odds", draft.odds.maxBp, (v) =>
-            patch((d) => ((d.odds.maxBp = v ?? d.odds.maxBp), d)),
+          {num(
+            "Hard max odds",
+            "odds.maxBp",
+            "odds",
+            draft.odds.maxBp,
+            (v) => patch((d) => ((d.odds.maxBp = v ?? d.odds.maxBp), d)),
+            "Above: refused in REAL (DEMO: explicit override)",
           )}
           <Field label="Same match on two branches">
             {(p) => (
@@ -340,7 +367,7 @@ export function StrategyForm({ initial }: { initial: StrategySettings }) {
               >
                 {SAME_EVENT_POLICIES.map((s) => (
                   <option key={s} value={s}>
-                    {s === "BLOCK" ? "Block (override with confirmation)" : "Warn only"}
+                    {s === "BLOCK" ? "Block (strict in REAL, override in DEMO)" : "Warn only"}
                   </option>
                 ))}
               </Select>
@@ -377,8 +404,29 @@ export function StrategyForm({ initial }: { initial: StrategySettings }) {
       </Card>
 
       <Card>
-        <CardHeader title="Display" />
+        <CardHeader title="Display, versioning & storage" />
         <CardBody className="grid gap-4 sm:grid-cols-5">
+          <Field
+            label="Strategy version"
+            error={issues.strategyVersion}
+            hint="Baseline 1.0 = final V1 rules"
+          >
+            {(p) => (
+              <Input
+                {...p}
+                value={draft.strategyVersion}
+                onChange={(e) => patch((d) => ((d.strategyVersion = e.target.value), d))}
+              />
+            )}
+          </Field>
+          {num(
+            "Automatic snapshots kept",
+            "backups.keepAutomatic",
+            "int",
+            draft.backups.keepAutomatic,
+            (v) => patch((d) => ((d.backups.keepAutomatic = v ?? 50), d)),
+            "Manual backups are never deleted",
+          )}
           <Field label="Currency" error={issues.currency}>
             {(p) => (
               <Input

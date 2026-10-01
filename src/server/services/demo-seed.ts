@@ -1,23 +1,21 @@
-import { eq } from "drizzle-orm";
 import { suggestedStakeCents } from "@/domain/strategy/engine";
+import { DEFAULT_SETTINGS, type StrategySettings } from "@/domain/strategy/settings";
 import type { Profile, SettleResult } from "@/domain/types";
-import type { Db } from "../db/client";
-import { branches } from "../db/schema";
-import { isDatabaseEmpty } from "./backup-service";
+import { createEmptyState } from "../state/integrity";
+import type { WorkspaceState } from "../state/schema";
+import { markWithdrawn } from "./bank-service";
 import { createTicket, settleTicket } from "./bet-service";
 import { createRootBranch } from "./branch-service";
 import { createCandidate } from "./candidate-service";
-import { DomainError } from "./errors";
-import { localDay } from "./internal";
+import { localDay, type OpContext } from "./internal";
 
 /**
- * Demo dataset. Nothing is inserted "by hand": every ticket is created and settled through
- * the real services, so BANK transfers, splits, maturity and deaths follow the rules engine.
- * Resulting tree (codes depend on the rules, profiles of children are chosen explicitly):
+ * DEMO dataset — only ever written to the DEMO workspace (REAL is never seeded).
  *
- *   A (balanced)  ── A1 (harvest, dead) · A2 (growth) ── A2.1 (harvest)
- *   B (harvest, mature) ── B1 (balanced, dead) · B2 (harvest) · B3 (growth)
- *   C (growth, dead)
+ * Nothing is inserted "by hand": every ticket is created and settled through the real
+ * services, so BANK transfers, splits, maturity and deaths follow the rules engine. One ticket
+ * deliberately uses a DEMO-only override (odds above the V1 maximum) to show how experiments
+ * outside the V1 rules are labelled.
  */
 
 const DAY = 86_400_000;
@@ -228,21 +226,24 @@ export interface SeedSummary {
   candidates: number;
 }
 
-export function seedDemoData(db: Db, now = new Date()): SeedSummary {
-  if (!isDatabaseEmpty(db)) {
-    throw new DomainError("INVALID_STATE", "Demo data can only be loaded into an empty database");
-  }
+/** Build a complete, freshly seeded DEMO state (pure: nothing is written here). */
+export function buildDemoState(
+  now = new Date(),
+  settings: StrategySettings = DEFAULT_SETTINGS,
+): { state: WorkspaceState; summary: SeedSummary } {
   const origin = new Date(now);
   origin.setHours(0, 0, 0, 0);
   const start = origin.getTime() - 30 * DAY;
   const at = (day: number, hour: number) => new Date(start + day * DAY + hour * HOUR);
+  const ctx = (date: Date): OpContext => ({ workspace: "DEMO", now: date });
+  const state = createEmptyState("DEMO", at(0, 8), settings);
 
   let matchIndex = 0;
   let tickets = 0;
-  const idOf = (code: string): string => {
-    const row = db.select({ id: branches.id }).from(branches).where(eq(branches.code, code)).get();
-    if (!row) throw new Error(`Seed: branch ${code} missing`);
-    return row.id;
+  const branchByCode = (code: string) => {
+    const branch = state.branches.find((b) => b.code === code);
+    if (!branch) throw new Error(`Demo seed: branch ${code} missing`);
+    return branch;
   };
 
   function round(
@@ -251,18 +252,17 @@ export function seedDemoData(db: Db, now = new Date()): SeedSummary {
     hour: number,
     oddsBp: number,
     result: SettleResult | "PENDING",
-    options: { childProfiles?: Profile[]; closingOddsBp?: number } = {},
+    options: { childProfiles?: Profile[]; closingOddsBp?: number; override?: string } = {},
   ): void {
-    const id = idOf(code);
-    const branch = db.select().from(branches).where(eq(branches.id, id)).get();
-    if (!branch) throw new Error(`Seed: branch ${code} missing`);
+    const branch = branchByCode(code);
     const match = MATCHES[matchIndex % MATCHES.length] as Match;
     matchIndex += 1;
     const pending = result === "PENDING";
+    const createdAt = pending ? new Date(now.getTime() - (4 - hour) * HOUR) : at(day, hour);
     const { bet } = createTicket(
-      db,
+      state,
       {
-        branchId: id,
+        branchId: branch.id,
         sport: match.sport,
         competition: match.competition,
         eventName: match.eventName,
@@ -273,40 +273,45 @@ export function seedDemoData(db: Db, now = new Date()): SeedSummary {
         oddsBp,
         stakeCents: suggestedStakeCents(branch),
         closingOddsBp: options.closingOddsBp,
-        protocolStatus: "ELIGIBLE",
+        protocolStatus: options.override ? "MANUAL" : "ELIGIBLE",
         confidence: 4,
         checklist: {
           singleMatch: "TRUE",
           preMatch: "TRUE",
-          oddsInRange: "TRUE",
+          oddsInRange: options.override ? "FALSE" : "TRUE",
           teamStrengthGap: "TRUE",
           lineupKnown: result === "LOST" ? "UNKNOWN" : "TRUE",
           noCorrelation: "TRUE",
         },
+        override: options.override ? { confirmed: true, reason: options.override } : undefined,
       },
-      pending ? new Date(now.getTime() - (4 - hour) * HOUR) : at(day, hour),
+      ctx(createdAt),
     );
     tickets += 1;
     if (!pending) {
       settleTicket(
-        db,
+        state,
         { betId: bet.id, result, childProfiles: options.childProfiles },
-        at(day, hour + 4),
+        ctx(at(day, hour + 4)),
       );
     }
   }
 
   // Chronological script (day, hour). Child profiles are chosen explicitly for a varied tree.
-  createRootBranch(db, { profile: "BALANCED", capitalCents: 10_000, notes: "Demo root" }, at(0, 9));
+  createRootBranch(
+    state,
+    { profile: "BALANCED", capitalCents: 10_000, notes: "Demo root" },
+    ctx(at(0, 9)),
+  );
   round("A", 0, 12, 13_000, "WON", { closingOddsBp: 12_600 });
   round("A", 1, 12, 13_000, "WON", { closingOddsBp: 12_800 });
   round("A", 2, 12, 13_000, "WON");
   createRootBranch(
-    db,
+    state,
     { profile: "HARVEST", capitalCents: 200_000, notes: "Demo root" },
-    at(2, 18),
+    ctx(at(2, 18)),
   );
-  round("A", 3, 12, 13_000, "WON", { childProfiles: ["HARVEST"], closingOddsBp: 13_200 }); // P1 → A1
+  round("A", 3, 12, 13_000, "WON", { childProfiles: ["HARVEST"], closingOddsBp: 13_200 }); // P1 (2.80×S) → A1
   round("B", 3, 15, 13_000, "WON", { childProfiles: ["BALANCED"] }); // cap → MATURE, B1
   round("A1", 4, 12, 12_200, "WON");
   round("A1", 5, 12, 12_500, "LOST", { closingOddsBp: 12_700 });
@@ -316,15 +321,19 @@ export function seedDemoData(db: Db, now = new Date()): SeedSummary {
   round("B", 7, 12, 12_500, "WON", { childProfiles: ["HARVEST"], closingOddsBp: 12_300 }); // B2
   round("A", 8, 12, 12_500, "WON");
   round("A", 9, 12, 13_000, "WON");
-  createRootBranch(db, { profile: "GROWTH", capitalCents: 15_000 }, at(9, 18));
+  createRootBranch(
+    state,
+    { profile: "GROWTH", capitalCents: 15_000, notes: "Demo root" },
+    ctx(at(9, 18)),
+  );
   round("B", 10, 12, 12_300, "VOID");
-  round("C", 10, 15, 12_500, "WON");
+  round("C", 10, 15, 13_400, "WON", { override: "DEMO experiment: odds above the V1 maximum" });
   round("A", 11, 12, 12_800, "WON");
   round("A", 12, 12, 13_000, "WON");
   round("C", 12, 15, 12_800, "LOST", { closingOddsBp: 13_100 });
   round("B", 13, 12, 12_200, "WON", { childProfiles: ["GROWTH"] }); // B3
   round("A", 14, 12, 12_600, "WON");
-  round("A", 15, 12, 12_700, "WON", { childProfiles: ["GROWTH"] }); // 6×S threshold → A2
+  round("A", 15, 12, 12_700, "WON", { childProfiles: ["GROWTH"] }); // threshold → A2
   round("B2", 15, 15, 12_500, "WON");
   round("A2", 16, 12, 13_000, "WON");
   round("A2", 17, 12, 12_400, "WON", { closingOddsBp: 12_100 });
@@ -339,6 +348,12 @@ export function seedDemoData(db: Db, now = new Date()): SeedSummary {
   round("A", 0, 1, 12_600, "PENDING");
   round("A2.1", 0, 2, 12_400, "PENDING");
   round("B2", 0, 3, 12_300, "PENDING");
+
+  // Part of the BANK has already been withdrawn from Winamax.
+  const firstBank = state.bankTransactions.slice(0, 3).map((t) => t.id);
+  if (firstBank.length > 0) {
+    markWithdrawn(state, { transactionIds: firstBank, destination: "LIVRET_A" }, ctx(at(16, 10)));
+  }
 
   // Shadow portfolio.
   const candidates = [
@@ -393,7 +408,7 @@ export function seedDemoData(db: Db, now = new Date()): SeedSummary {
   ] as const;
   candidates.forEach((c, i) => {
     createCandidate(
-      db,
+      state,
       {
         eventDate: localDay(at(18 + i * 2, 0)),
         sport: "Football",
@@ -412,13 +427,14 @@ export function seedDemoData(db: Db, now = new Date()): SeedSummary {
         },
         notes: c.status === "REJECTED" ? "Odds above the protocol range" : undefined,
       },
-      at(18 + i * 2, 12),
+      ctx(at(18 + i * 2, 12)),
     );
   });
 
+  state.metadata.demoSeed = { seededAt: now.getTime() };
+  state.savedAt = now.toISOString();
   return {
-    branches: db.select({ id: branches.id }).from(branches).all().length,
-    tickets,
-    candidates: candidates.length,
+    state,
+    summary: { branches: state.branches.length, tickets, candidates: candidates.length },
   };
 }

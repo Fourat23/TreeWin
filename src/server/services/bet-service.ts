@@ -1,5 +1,5 @@
-import { and, desc, eq, gt, gte, isNull, lt, max, ne, sql } from "drizzle-orm";
 import { z } from "zod";
+import { evaluateTicketPolicy, ticketRulesFor, type PolicyViolation } from "@/domain/bets/policy";
 import {
   createTicketSchema,
   eventKey,
@@ -8,41 +8,24 @@ import {
   type UpdateTicketDetailsInput,
 } from "@/domain/bets/tickets";
 import { calculateReturn, formatOdds } from "@/domain/money";
-import {
-  EngineError,
-  evaluateSettlement,
-  suggestedStakeCents,
-  type SettlementPlan,
-} from "@/domain/strategy/engine";
-import type { StrategySettings } from "@/domain/strategy/settings";
-import { isPlayable, PROFILES, SETTLE_RESULTS, type BirthReason } from "@/domain/types";
-import type { Db, DbOrTx } from "../db/client";
-import {
-  bankTransactions,
-  bets,
-  branchEvents,
-  branches,
-  type BetRow,
-  type BranchRow,
-} from "../db/schema";
-import { DomainError, notFound } from "./errors";
+import { EngineError, evaluateSettlement, type SettlementPlan } from "@/domain/strategy/engine";
+import { isPlayable, PROFILES, SETTLE_RESULTS } from "@/domain/types";
+import type { BetRecord, BranchRecord, WorkspaceState } from "../state/schema";
+import { DomainError } from "./errors";
 import {
   automaticProfileCounts,
+  getBetOrThrow,
   getBranchOrThrow,
-  hasPendingTicket,
-  insertEvent,
+  isOpenTicket,
+  localDay,
   moneyFormatter,
   newId,
   parseInput,
-  toBranchState,
+  pendingTicketOf,
+  pushEvent,
+  strategyStamp,
+  type OpContext,
 } from "./internal";
-import { getSettings } from "./settings-service";
-
-export function getBetOrThrow(tx: DbOrTx, betId: string): BetRow {
-  const row = tx.select().from(bets).where(eq(bets.id, betId)).get();
-  if (!row) throw notFound("Ticket", betId);
-  return row;
-}
 
 /* -------------------------------------------------------------------------- */
 /*                                 Protections                                */
@@ -74,59 +57,42 @@ export const conflictQuerySchema = z.object({
   excludeBetId: z.string().optional(),
 });
 
-/** Live protections for a prospective ticket (same match on another branch, daily limits). */
+/** Live protections for a prospective ticket (same match on another branch, limits). */
 export function checkTicketConflicts(
-  db: DbOrTx,
+  state: WorkspaceState,
   input: z.input<typeof conflictQuerySchema>,
-  now = new Date(),
+  now: Date,
 ): TicketConflicts {
   const query = parseInput(conflictQuerySchema, input);
-  const settings = getSettings(db);
-  const sameEvent: SameEventTicket[] =
+  const codes = new Map(state.branches.map((b) => [b.id, b.code]));
+  const key =
     query.eventName.length >= 3 && query.eventDate.length === 10
-      ? db
-          .select({
-            betId: bets.id,
-            branchId: bets.branchId,
-            branchCode: branches.code,
-            eventName: bets.eventName,
-            eventDate: bets.eventDate,
-            selection: bets.selection,
-          })
-          .from(bets)
-          .innerJoin(branches, eq(bets.branchId, branches.id))
-          .where(
-            and(
-              eq(bets.eventKey, eventKey(query.eventName, query.eventDate)),
-              eq(bets.result, "PENDING"),
-              isNull(bets.cancelledAt),
-              query.branchId ? ne(bets.branchId, query.branchId) : undefined,
-              query.excludeBetId ? ne(bets.id, query.excludeBetId) : undefined,
-            ),
-          )
-          .all()
-      : [];
-  const pendingCount = Number(
-    db
-      .select({ n: sql<number>`count(*)` })
-      .from(bets)
-      .where(and(eq(bets.result, "PENDING"), isNull(bets.cancelledAt)))
-      .get()?.n ?? 0,
-  );
-  const dayStart = new Date(now);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
-  const todayCount = Number(
-    db
-      .select({ n: sql<number>`count(*)` })
-      .from(bets)
-      .where(
-        and(gte(bets.createdAt, dayStart), lt(bets.createdAt, dayEnd), isNull(bets.cancelledAt)),
-      )
-      .get()?.n ?? 0,
-  );
-  const { maxPendingTickets, maxTicketsPerDay } = settings.limits;
+      ? eventKey(query.eventName, query.eventDate)
+      : null;
+  const sameEvent = key
+    ? state.bets
+        .filter(
+          (b) =>
+            isOpenTicket(b) &&
+            b.eventKey === key &&
+            b.branchId !== query.branchId &&
+            b.id !== query.excludeBetId,
+        )
+        .map((b) => ({
+          betId: b.id,
+          branchId: b.branchId,
+          branchCode: codes.get(b.branchId) ?? "?",
+          eventName: b.eventName,
+          eventDate: b.eventDate,
+          selection: b.selection,
+        }))
+    : [];
+  const today = localDay(now);
+  const pendingCount = state.bets.filter(isOpenTicket).length;
+  const todayCount = state.bets.filter(
+    (b) => b.cancelledAt === null && localDay(new Date(b.createdAt)) === today,
+  ).length;
+  const { maxPendingTickets, maxTicketsPerDay } = state.settings.limits;
   return {
     sameEvent,
     pendingCount,
@@ -143,155 +109,131 @@ export function checkTicketConflicts(
 /* -------------------------------------------------------------------------- */
 
 export interface CreateTicketResult {
-  bet: BetRow;
+  bet: BetRecord;
   warnings: string[];
 }
 
+function policyError(violations: PolicyViolation[]): DomainError {
+  return new DomainError("POLICY_VIOLATION", violations[0]?.message ?? "Ticket refused", {
+    violations,
+  });
+}
+
 export function createTicket(
-  db: Db,
+  state: WorkspaceState,
   input: CreateTicketInput,
-  now = new Date(),
+  ctx: OpContext,
 ): CreateTicketResult {
   const data = parseInput(createTicketSchema, input);
-  const settings = getSettings(db);
+  const settings = state.settings;
   const fmt = moneyFormatter(settings);
-
-  return db.transaction((tx) => {
-    const branch = getBranchOrThrow(tx, data.branchId);
-    if (!isPlayable(branch.status)) {
-      throw new DomainError(
-        "INVALID_STATE",
-        `${branch.code} is ${branch.status}: no new round can be opened`,
-      );
-    }
-    if (hasPendingTicket(tx, branch.id)) {
-      throw new DomainError("PENDING_EXISTS", `${branch.code} already has a pending ticket`);
-    }
-    if (data.stakeCents > branch.currentCapitalCents) {
-      throw new DomainError(
-        "VALIDATION",
-        `Stake exceeds ${branch.code} capital (${fmt(branch.currentCapitalCents)})`,
-      );
-    }
-
-    const conflicts = checkTicketConflicts(
-      tx,
-      { eventName: data.eventName, eventDate: data.eventDate, branchId: branch.id },
-      now,
+  const branch = getBranchOrThrow(state, data.branchId);
+  if (!isPlayable(branch.status)) {
+    throw new DomainError(
+      "INVALID_STATE",
+      `${branch.code} is ${branch.status}: no new round can be opened`,
     );
-    const blocking: { code: "SAME_EVENT_CONFLICT" | "LIMIT_REACHED"; message: string }[] = [];
-    if (conflicts.sameEvent.length > 0 && settings.sameEventPolicy === "BLOCK") {
-      blocking.push({
-        code: "SAME_EVENT_CONFLICT",
-        message: `Same match already pending on ${conflicts.sameEvent
-          .map((c) => c.branchCode)
-          .join(", ")}. Correlated branches are blocked by default.`,
-      });
-    }
-    if (conflicts.pendingLimitReached) {
-      blocking.push({
-        code: "LIMIT_REACHED",
-        message: `Maximum of ${conflicts.maxPendingTickets} concurrent pending tickets reached`,
-      });
-    }
-    if (conflicts.dailyLimitReached) {
-      blocking.push({
-        code: "LIMIT_REACHED",
-        message: `Maximum of ${conflicts.maxTicketsPerDay} tickets per day reached`,
-      });
-    }
-    const [firstBlocking] = blocking;
-    if (firstBlocking && !data.override) {
-      throw new DomainError(firstBlocking.code, firstBlocking.message, {
-        conflicts,
-        reasons: blocking.map((b) => b.message),
-      });
-    }
+  }
+  if (pendingTicketOf(state, branch.id)) {
+    throw new DomainError("PENDING_EXISTS", `${branch.code} already has a pending ticket`);
+  }
 
-    const warnings: string[] = [];
-    if (conflicts.sameEvent.length > 0 && settings.sameEventPolicy === "WARN") {
-      warnings.push("Same match already pending on another branch");
-    }
-    if (data.oddsBp < settings.odds.minBp || data.oddsBp > settings.odds.maxBp) {
-      warnings.push(
-        `Odds ${formatOdds(data.oddsBp)} outside the configured range ${formatOdds(
-          settings.odds.minBp,
-        )}–${formatOdds(settings.odds.maxBp)}`,
-      );
-    }
-    const suggested = suggestedStakeCents(branch);
-    if (data.stakeCents < suggested) {
-      warnings.push(`Stake below the suggested ${fmt(suggested)}`);
-    }
-
-    const sequenceRow = tx
-      .select({ value: max(bets.sequence) })
-      .from(bets)
-      .where(eq(bets.branchId, branch.id))
-      .get();
-    const sequence = (sequenceRow?.value ?? 0) + 1;
-    const roundNumber = branch.roundCount + 1;
-    const potentialReturnCents = calculateReturn(data.stakeCents, data.oddsBp);
-    const id = newId();
-    const overrideReason = blocking.length > 0 && data.override ? data.override.reason : null;
-
-    tx.insert(bets)
-      .values({
-        id,
-        branchId: branch.id,
-        sequence,
-        roundNumber,
-        createdAt: now,
-        updatedAt: now,
-        eventDate: data.eventDate,
-        eventTime: data.eventTime ?? null,
-        sport: data.sport,
-        competition: data.competition,
-        eventName: data.eventName,
-        eventKey: eventKey(data.eventName, data.eventDate),
-        homeTeam: data.homeTeam ?? null,
-        awayTeam: data.awayTeam ?? null,
-        marketName: data.marketName,
-        selection: data.selection,
-        oddsBp: data.oddsBp,
-        stakeCents: data.stakeCents,
-        potentialReturnCents,
-        result: "PENDING",
-        capitalBeforeCents: branch.currentCapitalCents,
-        closingOddsBp: data.closingOddsBp ?? null,
-        notes: data.notes ?? null,
-        protocolStatus: data.protocolStatus ?? null,
-        confidence: data.confidence ?? null,
-        checklist: data.checklist,
-        overrideReason,
-      })
-      .run();
-
-    insertEvent(tx, {
-      branchId: branch.id,
-      type: "BET_CREATED",
-      createdAt: now,
-      amountCents: data.stakeCents,
-      capitalDeltaCents: 0,
-      capitalAfterCents: branch.currentCapitalCents,
-      statusAfter: branch.status,
-      relatedBetId: id,
-      description: `${settings.roundShortLabel}${roundNumber} opened — ${data.eventName} · ${
-        data.selection
-      } @${formatOdds(data.oddsBp)} · stake ${fmt(data.stakeCents)}`,
-      metadata: {
-        eventName: data.eventName,
-        selection: data.selection,
-        oddsBp: data.oddsBp,
-        stakeCents: data.stakeCents,
-        potentialReturnCents,
-        overrideReason,
-        warnings,
-      },
-    });
-    tx.update(branches).set({ updatedAt: now }).where(eq(branches.id, branch.id)).run();
-    return { bet: getBetOrThrow(tx, id), warnings };
+  const conflicts = checkTicketConflicts(
+    state,
+    { eventName: data.eventName, eventDate: data.eventDate, branchId: branch.id },
+    ctx.now,
+  );
+  const policy = evaluateTicketPolicy({
+    workspace: ctx.workspace,
+    rules: ticketRulesFor(settings, branch.profile),
+    branch,
+    stakeCents: data.stakeCents,
+    oddsBp: data.oddsBp,
+    sameEventBranchCodes: conflicts.sameEvent.map((c) => c.branchCode),
+    pendingLimitReached: conflicts.pendingLimitReached,
+    dailyLimitReached: conflicts.dailyLimitReached,
   });
+  // A violation passes only if it is overridable in this workspace AND explicitly overridden.
+  const blocking = policy.violations.filter((v) => !v.overridable || !data.override);
+  if (blocking.length > 0) throw policyError(policy.violations);
+  const overrideReason =
+    policy.violations.length > 0 && data.override ? data.override.reason : null;
+  const outsideV1 = policy.violations.some(
+    (v) => v.code === "STAKE_NOT_FULL" || v.code === "ODDS_ABOVE_MAX" || v.code === "SAME_EVENT",
+  );
+
+  const sequence =
+    Math.max(0, ...state.bets.filter((b) => b.branchId === branch.id).map((b) => b.sequence)) + 1;
+  const roundNumber = branch.roundCount + 1;
+  const potentialReturnCents = calculateReturn(data.stakeCents, data.oddsBp);
+  const now = ctx.now.getTime();
+  const bet: BetRecord = {
+    id: newId(),
+    branchId: branch.id,
+    sequence,
+    roundNumber,
+    createdAt: now,
+    updatedAt: now,
+    settledAt: null,
+    eventDate: data.eventDate,
+    eventTime: data.eventTime ?? null,
+    sport: data.sport,
+    competition: data.competition,
+    eventName: data.eventName,
+    eventKey: eventKey(data.eventName, data.eventDate),
+    homeTeam: data.homeTeam ?? null,
+    awayTeam: data.awayTeam ?? null,
+    marketName: data.marketName,
+    selection: data.selection,
+    bookmaker: "WINAMAX",
+    oddsBp: data.oddsBp,
+    stakeCents: data.stakeCents,
+    potentialReturnCents,
+    result: "PENDING",
+    actualReturnCents: null,
+    profitLossCents: null,
+    capitalBeforeCents: branch.currentCapitalCents,
+    capitalAfterCents: null,
+    countsAsRound: null,
+    closingOddsBp: data.closingOddsBp ?? null,
+    notes: data.notes ?? null,
+    protocolStatus: data.protocolStatus ?? null,
+    confidence: data.confidence ?? null,
+    checklist: data.checklist,
+    screenshotPath: null,
+    overrideReason,
+    outsideV1,
+    cancelledAt: null,
+    cancelReason: null,
+    ...strategyStamp(state),
+  };
+  state.bets.push(bet);
+  pushEvent(state, {
+    branchId: branch.id,
+    type: "BET_CREATED",
+    createdAt: now,
+    amountCents: data.stakeCents,
+    capitalDeltaCents: 0,
+    capitalAfterCents: branch.currentCapitalCents,
+    statusAfter: branch.status,
+    relatedBetId: bet.id,
+    relatedBranchId: null,
+    description: `${settings.roundShortLabel}${roundNumber} opened — ${data.eventName} · ${
+      data.selection
+    } @${formatOdds(data.oddsBp)} · stake ${fmt(data.stakeCents)}`,
+    metadata: {
+      eventName: data.eventName,
+      selection: data.selection,
+      oddsBp: data.oddsBp,
+      stakeCents: data.stakeCents,
+      potentialReturnCents,
+      overrideReason,
+      overridden: overrideReason ? policy.violations.map((v) => v.code) : [],
+      warnings: policy.warnings,
+    },
+  });
+  branch.updatedAt = now;
+  return { bet, warnings: policy.warnings };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -307,28 +249,42 @@ export const settleTicketSchema = z.object({
 export type SettleTicketInput = z.input<typeof settleTicketSchema>;
 
 export interface SettlementPreview {
-  bet: BetRow;
-  branch: BranchRow;
+  bet: BetRecord;
+  branch: BranchRecord;
   plan: SettlementPlan;
 }
 
-function planFor(
-  tx: DbOrTx,
-  input: z.output<typeof settleTicketSchema>,
-  settings: StrategySettings,
-) {
-  const bet = getBetOrThrow(tx, input.betId);
-  if (bet.result !== "PENDING" || bet.cancelledAt) {
+/** Dry-run of a settlement: what would happen, without changing anything. */
+export function previewSettlement(
+  state: WorkspaceState,
+  input: SettleTicketInput,
+): SettlementPreview {
+  const data = parseInput(settleTicketSchema, input);
+  const bet = getBetOrThrow(state, data.betId);
+  if (!isOpenTicket(bet))
     throw new DomainError("INVALID_STATE", "Only pending tickets can be settled");
-  }
-  const branch = getBranchOrThrow(tx, bet.branchId);
+  const branch = getBranchOrThrow(state, bet.branchId);
   try {
     const plan = evaluateSettlement(
-      toBranchState(branch),
+      {
+        code: branch.code,
+        profile: branch.profile,
+        status: branch.status,
+        birthCapitalCents: branch.birthCapitalCents,
+        currentCapitalCents: branch.currentCapitalCents,
+        capCents: branch.capCents,
+        p1Done: branch.p1Done,
+        thresholdLevel: branch.thresholdLevel,
+        wins: branch.wins,
+        losses: branch.losses,
+        voids: branch.voids,
+        roundCount: branch.roundCount,
+        childCount: branch.childCount,
+      },
       { roundNumber: bet.roundNumber, stakeCents: bet.stakeCents, oddsBp: bet.oddsBp },
-      input.result,
-      settings,
-      { profileCounts: automaticProfileCounts(tx), childProfileOverrides: input.childProfiles },
+      data.result,
+      state.settings,
+      { profileCounts: automaticProfileCounts(state), childProfileOverrides: data.childProfiles },
     );
     return { bet, branch, plan };
   } catch (error) {
@@ -337,177 +293,168 @@ function planFor(
   }
 }
 
-/** Dry-run of a settlement: what would happen, without writing anything. */
-export function previewSettlement(db: DbOrTx, input: SettleTicketInput): SettlementPreview {
-  const data = parseInput(settleTicketSchema, input);
-  return planFor(db, data, getSettings(db));
-}
-
 export interface SettlementOutcome extends SettlementPreview {
   childIds: string[];
   bankTransactionIds: string[];
 }
 
 /**
- * Settle a ticket and apply every consequence (BANK transfers, children, maturity, death)
- * atomically: either the whole plan is persisted or nothing is.
+ * Settle a ticket and apply every consequence (BANK transfers, children, maturity, death) on
+ * the draft. The repository persists the draft atomically — all or nothing.
  */
 export function settleTicket(
-  db: Db,
+  state: WorkspaceState,
   input: SettleTicketInput,
-  now = new Date(),
+  ctx: OpContext,
 ): SettlementOutcome {
-  const data = parseInput(settleTicketSchema, input);
-  const settings = getSettings(db);
+  const { bet, branch, plan } = previewSettlement(state, input);
+  const settings = state.settings;
   const fmt = moneyFormatter(settings);
+  const now = ctx.now.getTime();
+  const stamp = strategyStamp(state);
 
-  return db.transaction((tx) => {
-    const { bet, branch, plan } = planFor(tx, data, settings);
-
-    tx.update(bets)
-      .set({
-        result: plan.result,
-        settledAt: now,
-        updatedAt: now,
-        actualReturnCents: plan.actualReturnCents,
-        profitLossCents: plan.profitLossCents,
-        capitalAfterCents: plan.capitalAfterBetCents,
-        countsAsRound: plan.countsAsRound,
-      })
-      .where(eq(bets.id, bet.id))
-      .run();
-
-    // 1. Children rows first (events reference them).
-    const childIds = plan.children.map((child) => {
-      const id = newId();
-      const capCents = Math.max(settings.profiles[child.profile].capCents, child.capitalCents);
-      tx.insert(branches)
-        .values({
-          id,
-          code: child.code,
-          parentId: branch.id,
-          generation: branch.generation + 1,
-          profile: child.profile,
-          status: "ACTIVE",
-          birthReason: child.reason satisfies BirthReason,
-          birthBetId: bet.id,
-          birthCapitalCents: child.capitalCents,
-          currentCapitalCents: child.capitalCents,
-          capCents,
-          peakCapitalCents: child.capitalCents,
-          p1Done: !settings.p1.enabled,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .run();
-      return id;
-    });
-
-    // 2. BANK transactions — money only flows in, never back to the branches.
-    const bankTransactionIds = plan.bankTransfers.map((transfer) => {
-      const id = newId();
-      tx.insert(bankTransactions)
-        .values({
-          id,
-          branchId: branch.id,
-          relatedBetId: bet.id,
-          amountCents: transfer.amountCents,
-          createdAt: now,
-          type: transfer.type,
-          harvestKind: transfer.harvestKind,
-          profile: branch.profile,
-          destination: "UNALLOCATED",
-          notes: null,
-        })
-        .run();
-      return id;
-    });
-
-    // 3. Event log, in plan order; each child's BIRTH right after its CHILD_CREATED.
-    for (const event of plan.events) {
-      const childId = event.childIndex !== undefined ? childIds[event.childIndex] : undefined;
-      const bankIndex = event.metadata.bankTransferIndex;
-      const metadata =
-        typeof bankIndex === "number"
-          ? { ...event.metadata, bankTransactionId: bankTransactionIds[bankIndex] }
-          : event.metadata;
-      insertEvent(tx, {
-        branchId: branch.id,
-        type: event.type,
-        createdAt: now,
-        amountCents: event.amountCents,
-        capitalDeltaCents: event.capitalDeltaCents,
-        capitalAfterCents: event.capitalAfterCents,
-        statusAfter: event.statusAfter,
-        relatedBetId: bet.id,
-        relatedBranchId: childId ?? null,
-        metadata,
-        description: event.description,
-      });
-      if (event.type === "CHILD_CREATED" && childId && event.childIndex !== undefined) {
-        const child = plan.children[event.childIndex];
-        if (!child) continue;
-        const birthEventId = insertEvent(tx, {
-          branchId: childId,
-          type: "BIRTH",
-          createdAt: now,
-          amountCents: child.capitalCents,
-          capitalDeltaCents: child.capitalCents,
-          capitalAfterCents: child.capitalCents,
-          statusAfter: "ACTIVE",
-          relatedBetId: bet.id,
-          relatedBranchId: branch.id,
-          description: `Born from ${branch.code} (${child.reason}) in ${settings.roundShortLabel}${
-            bet.roundNumber
-          } with ${fmt(child.capitalCents)} — ${child.profile.toLowerCase()}`,
-          metadata: {
-            reason: child.reason,
-            parentCode: branch.code,
-            profile: child.profile,
-            roundNumber: bet.roundNumber,
-          },
-        });
-        tx.update(branches).set({ birthEventId }).where(eq(branches.id, childId)).run();
-      }
-    }
-
-    // 4. Mother branch.
-    tx.update(branches)
-      .set({
-        currentCapitalCents: plan.finalCapitalCents,
-        status: plan.status,
-        p1Done: plan.p1Done,
-        thresholdLevel: plan.thresholdLevel,
-        wins: plan.wins,
-        losses: plan.losses,
-        voids: plan.voids,
-        roundCount: plan.roundCount,
-        childCount: branch.childCount + plan.children.length,
-        totalBankGeneratedCents: branch.totalBankGeneratedCents + plan.totalBankCents,
-        totalChildCapitalGeneratedCents:
-          branch.totalChildCapitalGeneratedCents + plan.totalChildCapitalCents,
-        totalLostCents: branch.totalLostCents + plan.lostCents,
-        peakCapitalCents: Math.max(branch.peakCapitalCents, plan.capitalAfterBetCents),
-        maturedAt: plan.matured ? now : branch.maturedAt,
-        diedAt: plan.died ? now : branch.diedAt,
-        lastRoundAt: now,
-        updatedAt: now,
-      })
-      .where(eq(branches.id, branch.id))
-      .run();
-
-    return {
-      bet: getBetOrThrow(tx, bet.id),
-      branch: getBranchOrThrow(tx, branch.id),
-      plan,
-      childIds,
-      bankTransactionIds,
-    };
+  Object.assign(bet, {
+    result: plan.result,
+    settledAt: now,
+    updatedAt: now,
+    actualReturnCents: plan.actualReturnCents,
+    profitLossCents: plan.profitLossCents,
+    capitalAfterCents: plan.capitalAfterBetCents,
+    countsAsRound: plan.countsAsRound,
   });
+
+  // 1. Children first (events reference them).
+  const children = plan.children.map((child) => {
+    const record: BranchRecord = {
+      id: newId(),
+      code: child.code,
+      parentId: branch.id,
+      generation: branch.generation + 1,
+      profile: child.profile,
+      status: "ACTIVE",
+      birthReason: child.reason,
+      birthBetId: bet.id,
+      birthEventId: null,
+      birthCapitalCents: child.capitalCents,
+      currentCapitalCents: child.capitalCents,
+      capCents: Math.max(settings.profiles[child.profile].capCents, child.capitalCents),
+      peakCapitalCents: child.capitalCents,
+      p1Done: !settings.p1.enabled,
+      thresholdLevel: 0,
+      totalBankGeneratedCents: 0,
+      totalChildCapitalGeneratedCents: 0,
+      totalLostCents: 0,
+      wins: 0,
+      losses: 0,
+      voids: 0,
+      roundCount: 0,
+      childCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      maturedAt: null,
+      diedAt: null,
+      lastRoundAt: null,
+      notes: null,
+      ...stamp,
+    };
+    state.branches.push(record);
+    return record;
+  });
+
+  // 2. BANK transactions — money only flows in, never back to the branches.
+  const bankTransactionIds = plan.bankTransfers.map((transfer) => {
+    const id = newId();
+    state.bankTransactions.push({
+      id,
+      branchId: branch.id,
+      relatedBetId: bet.id,
+      amountCents: transfer.amountCents,
+      createdAt: now,
+      type: transfer.type,
+      harvestKind: transfer.harvestKind,
+      profile: branch.profile,
+      status: "SECURED",
+      withdrawnAt: null,
+      destination: "UNALLOCATED",
+      notes: null,
+    });
+    return id;
+  });
+
+  // 3. Event log, in plan order; each child's BIRTH right after its CHILD_CREATED.
+  for (const event of plan.events) {
+    const child = event.childIndex !== undefined ? children[event.childIndex] : undefined;
+    const bankIndex = event.metadata.bankTransferIndex;
+    const metadata =
+      typeof bankIndex === "number"
+        ? { ...event.metadata, bankTransactionId: bankTransactionIds[bankIndex] }
+        : event.metadata;
+    pushEvent(state, {
+      branchId: branch.id,
+      type: event.type,
+      createdAt: now,
+      amountCents: event.amountCents,
+      capitalDeltaCents: event.capitalDeltaCents,
+      capitalAfterCents: event.capitalAfterCents,
+      statusAfter: event.statusAfter,
+      relatedBetId: bet.id,
+      relatedBranchId: child?.id ?? null,
+      metadata,
+      description: event.description,
+    });
+    if (event.type === "CHILD_CREATED" && child) {
+      child.birthEventId = pushEvent(state, {
+        branchId: child.id,
+        type: "BIRTH",
+        createdAt: now,
+        amountCents: child.birthCapitalCents,
+        capitalDeltaCents: child.birthCapitalCents,
+        capitalAfterCents: child.birthCapitalCents,
+        statusAfter: "ACTIVE",
+        relatedBetId: bet.id,
+        relatedBranchId: branch.id,
+        description: `Born from ${branch.code} (${child.birthReason}) in ${settings.roundShortLabel}${
+          bet.roundNumber
+        } with ${fmt(child.birthCapitalCents)} — ${child.profile.toLowerCase()}`,
+        metadata: {
+          reason: child.birthReason,
+          parentCode: branch.code,
+          profile: child.profile,
+          capCents: child.capCents,
+          p1Done: child.p1Done,
+          roundNumber: bet.roundNumber,
+        },
+      });
+    }
+  }
+
+  // 4. Mother branch.
+  Object.assign(branch, {
+    currentCapitalCents: plan.finalCapitalCents,
+    status: plan.status,
+    p1Done: plan.p1Done,
+    thresholdLevel: plan.thresholdLevel,
+    wins: plan.wins,
+    losses: plan.losses,
+    voids: plan.voids,
+    roundCount: plan.roundCount,
+    childCount: branch.childCount + plan.children.length,
+    totalBankGeneratedCents: branch.totalBankGeneratedCents + plan.totalBankCents,
+    totalChildCapitalGeneratedCents:
+      branch.totalChildCapitalGeneratedCents + plan.totalChildCapitalCents,
+    totalLostCents: branch.totalLostCents + plan.lostCents,
+    peakCapitalCents: Math.max(branch.peakCapitalCents, plan.capitalAfterBetCents),
+    maturedAt: plan.matured ? now : branch.maturedAt,
+    diedAt: plan.died ? now : branch.diedAt,
+    lastRoundAt: now,
+    updatedAt: now,
+  });
+
+  return { bet, branch, plan, childIds: children.map((c) => c.id), bankTransactionIds };
 }
 
 /* -------------------------------------------------------------------------- */
-/*                         Cancellation, edits, revert                        */
+/*                            Cancellation & edits                            */
 /* -------------------------------------------------------------------------- */
 
 export const cancelTicketSchema = z.object({
@@ -515,266 +462,102 @@ export const cancelTicketSchema = z.object({
   reason: z.string().trim().min(3, { error: "A reason is required" }).max(500),
 });
 
-/** Cancel a pending ticket entered by mistake (soft delete, journaled). */
+/** Cancel a pending ticket entered by mistake (soft delete: it stays in the journal). */
 export function cancelPendingTicket(
-  db: Db,
+  state: WorkspaceState,
   input: z.input<typeof cancelTicketSchema>,
-  now = new Date(),
-) {
+  ctx: OpContext,
+): BetRecord {
   const data = parseInput(cancelTicketSchema, input);
-  const settings = getSettings(db);
-  return db.transaction((tx) => {
-    const bet = getBetOrThrow(tx, data.betId);
-    if (bet.result !== "PENDING" || bet.cancelledAt) {
-      throw new DomainError("INVALID_STATE", "Only pending tickets can be cancelled");
+  const bet = getBetOrThrow(state, data.betId);
+  if (!isOpenTicket(bet))
+    throw new DomainError("INVALID_STATE", "Only pending tickets can be cancelled");
+  const branch = getBranchOrThrow(state, bet.branchId);
+  const now = ctx.now.getTime();
+  bet.cancelledAt = now;
+  bet.cancelReason = data.reason;
+  bet.updatedAt = now;
+  pushEvent(state, {
+    branchId: branch.id,
+    type: "BET_CANCELLED",
+    createdAt: now,
+    amountCents: bet.stakeCents,
+    capitalDeltaCents: 0,
+    capitalAfterCents: branch.currentCapitalCents,
+    statusAfter: branch.status,
+    relatedBetId: bet.id,
+    relatedBranchId: null,
+    description: `${state.settings.roundShortLabel}${bet.roundNumber} ticket cancelled before settlement — ${data.reason}`,
+    metadata: { reason: data.reason },
+  });
+  return bet;
+}
+
+/** Descriptive fields whose edit is not journaled (post-match annotations). */
+const ANNOTATION_FIELDS = new Set(["closingOddsBp", "notes", "protocolStatus", "confidence"]);
+
+/**
+ * Edit descriptive fields of a ticket. Stake, odds and result are never editable here: money
+ * corrections go through the correction workflow (reopen / delete from this point).
+ * Identity edits of a settled ticket are journaled as MANUAL_ADJUSTMENT (no capital effect).
+ */
+export function updateTicketDetails(
+  state: WorkspaceState,
+  input: UpdateTicketDetailsInput & { override?: { confirmed: true; reason: string } },
+  ctx: OpContext,
+): BetRecord {
+  const { betId, ...changes } = parseInput(updateTicketDetailsSchema, input);
+  const bet = getBetOrThrow(state, betId);
+  const changed: Record<string, { from: unknown; to: unknown }> = {};
+  for (const [key, value] of Object.entries(changes) as [keyof BetRecord, unknown][]) {
+    if (value === undefined || bet[key] === value) continue;
+    changed[key] = { from: bet[key], to: value };
+  }
+  if (Object.keys(changed).length === 0) return bet;
+
+  const eventName = (changes.eventName ?? bet.eventName) as string;
+  const eventDate = (changes.eventDate ?? bet.eventDate) as string;
+  if (("eventName" in changed || "eventDate" in changed) && isOpenTicket(bet)) {
+    const conflicts = checkTicketConflicts(
+      state,
+      { eventName, eventDate, branchId: bet.branchId, excludeBetId: bet.id },
+      ctx.now,
+    );
+    if (conflicts.sameEvent.length > 0 && state.settings.sameEventPolicy === "BLOCK") {
+      const allowed = ctx.workspace === "DEMO" && input.override;
+      if (!allowed) {
+        throw policyError([
+          {
+            code: "SAME_EVENT",
+            message: `Same match already pending on ${conflicts.sameEvent.map((c) => c.branchCode).join(", ")}`,
+            overridable: ctx.workspace === "DEMO",
+          },
+        ]);
+      }
     }
-    const branch = getBranchOrThrow(tx, bet.branchId);
-    tx.update(bets)
-      .set({ cancelledAt: now, cancelReason: data.reason, updatedAt: now })
-      .where(eq(bets.id, bet.id))
-      .run();
-    insertEvent(tx, {
+  }
+  for (const key of Object.keys(changed)) {
+    (bet as Record<string, unknown>)[key] = (changes as Record<string, unknown>)[key];
+  }
+  bet.eventKey = eventKey(eventName, eventDate);
+  bet.updatedAt = ctx.now.getTime();
+
+  const journaled = Object.keys(changed).filter((k) => !ANNOTATION_FIELDS.has(k));
+  if (bet.result !== "PENDING" && journaled.length > 0) {
+    const branch = getBranchOrThrow(state, bet.branchId);
+    pushEvent(state, {
       branchId: branch.id,
-      type: "BET_CANCELLED",
-      createdAt: now,
-      amountCents: bet.stakeCents,
+      type: "MANUAL_ADJUSTMENT",
+      createdAt: ctx.now.getTime(),
+      amountCents: null,
       capitalDeltaCents: 0,
       capitalAfterCents: branch.currentCapitalCents,
       statusAfter: branch.status,
       relatedBetId: bet.id,
-      description: `${settings.roundShortLabel}${bet.roundNumber} ticket cancelled before settlement — ${data.reason}`,
-      metadata: { reason: data.reason },
+      relatedBranchId: null,
+      description: `Settled ticket ${state.settings.roundShortLabel}${bet.roundNumber} edited (${journaled.join(", ")})`,
+      metadata: { kind: "TICKET_EDIT", changes: changed },
     });
-    return getBetOrThrow(tx, bet.id);
-  });
-}
-
-const FINANCIAL_SAFE_FIELDS = new Set(["closingOddsBp", "notes", "protocolStatus", "confidence"]);
-
-/**
- * Edit descriptive fields of a ticket. Stake, odds and result are never editable here:
- * money corrections go through settlement revert or explicit manual adjustments.
- * Edits of a settled ticket's identity are journaled as MANUAL_ADJUSTMENT (no capital effect).
- */
-export function updateTicketDetails(
-  db: Db,
-  input: UpdateTicketDetailsInput & { override?: { confirmed: true; reason: string } },
-  now = new Date(),
-): BetRow {
-  const { betId, ...changes } = parseInput(updateTicketDetailsSchema, input);
-  return db.transaction((tx) => {
-    const bet = getBetOrThrow(tx, betId);
-    const patch: Partial<BetRow> = {};
-    const changed: Record<string, { from: unknown; to: unknown }> = {};
-    for (const [key, value] of Object.entries(changes) as [keyof typeof changes, unknown][]) {
-      if (value === undefined) continue;
-      const current = bet[key as keyof BetRow];
-      if (current === value) continue;
-      changed[key] = { from: current, to: value };
-      (patch as Record<string, unknown>)[key] = value;
-    }
-    if (Object.keys(changed).length === 0) return bet;
-
-    const identityChanged = "eventName" in changed || "eventDate" in changed;
-    if (identityChanged) {
-      const eventName = (patch.eventName ?? bet.eventName) as string;
-      const eventDate = (patch.eventDate ?? bet.eventDate) as string;
-      patch.eventKey = eventKey(eventName, eventDate);
-      if (bet.result === "PENDING" && !bet.cancelledAt) {
-        const conflicts = checkTicketConflicts(tx, {
-          eventName,
-          eventDate,
-          branchId: bet.branchId,
-          excludeBetId: bet.id,
-        });
-        if (
-          conflicts.sameEvent.length > 0 &&
-          getSettings(tx).sameEventPolicy === "BLOCK" &&
-          !input.override
-        ) {
-          throw new DomainError(
-            "SAME_EVENT_CONFLICT",
-            "Same match already pending on another branch",
-            {
-              conflicts,
-            },
-          );
-        }
-      }
-    }
-    tx.update(bets)
-      .set({ ...patch, updatedAt: now })
-      .where(eq(bets.id, bet.id))
-      .run();
-
-    const journaled = Object.keys(changed).filter((k) => !FINANCIAL_SAFE_FIELDS.has(k));
-    if (bet.result !== "PENDING" && journaled.length > 0) {
-      const branch = getBranchOrThrow(tx, bet.branchId);
-      insertEvent(tx, {
-        branchId: branch.id,
-        type: "MANUAL_ADJUSTMENT",
-        createdAt: now,
-        capitalDeltaCents: 0,
-        capitalAfterCents: branch.currentCapitalCents,
-        statusAfter: branch.status,
-        relatedBetId: bet.id,
-        description: `Settled ticket ${getSettings(tx).roundShortLabel}${bet.roundNumber} edited (${journaled.join(", ")})`,
-        metadata: { kind: "TICKET_EDIT", changes: changed },
-      });
-    }
-    return getBetOrThrow(tx, bet.id);
-  });
-}
-
-export const revertSettlementSchema = z.object({
-  betId: z.string().min(1),
-  reason: z.string().trim().min(3, { error: "A reason is required" }).max(500),
-});
-
-export interface RevertCheck {
-  revertible: boolean;
-  reason: string | null;
-}
-
-/**
- * A settlement can be reverted (to fix a wrong result) only when it had no side effects
- * beyond the branch itself: it must be the branch's latest ticket, and must not have
- * created children, BANK transfers or maturity. Otherwise use a manual adjustment.
- */
-export function checkRevertible(db: DbOrTx, betId: string): RevertCheck {
-  const bet = getBetOrThrow(db, betId);
-  if (bet.result === "PENDING" || bet.cancelledAt) {
-    return { revertible: false, reason: "Ticket is not settled" };
   }
-  const later = db
-    .select({ id: bets.id })
-    .from(bets)
-    .where(
-      and(
-        eq(bets.branchId, bet.branchId),
-        gte(bets.sequence, bet.sequence + 1),
-        isNull(bets.cancelledAt),
-      ),
-    )
-    .get();
-  if (later) return { revertible: false, reason: "A later ticket exists on this branch" };
-  const children = db
-    .select({ id: branches.id })
-    .from(branches)
-    .where(eq(branches.birthBetId, bet.id))
-    .get();
-  if (children) return { revertible: false, reason: "This settlement created child branches" };
-  const bank = db
-    .select({ id: bankTransactions.id })
-    .from(bankTransactions)
-    .where(eq(bankTransactions.relatedBetId, bet.id))
-    .get();
-  if (bank) return { revertible: false, reason: "This settlement sent money to the BANK" };
-  const matured = db
-    .select({ id: branchEvents.id })
-    .from(branchEvents)
-    .where(and(eq(branchEvents.relatedBetId, bet.id), eq(branchEvents.type, "CAP_REACHED")))
-    .get();
-  if (matured) return { revertible: false, reason: "This settlement made the branch mature" };
-  const lastSettlementEvent = db
-    .select({ id: max(branchEvents.id) })
-    .from(branchEvents)
-    .where(and(eq(branchEvents.branchId, bet.branchId), eq(branchEvents.relatedBetId, bet.id)))
-    .get();
-  const laterEvent = db
-    .select({ id: branchEvents.id })
-    .from(branchEvents)
-    .where(
-      and(
-        eq(branchEvents.branchId, bet.branchId),
-        gt(branchEvents.id, lastSettlementEvent?.id ?? Number.MAX_SAFE_INTEGER),
-      ),
-    )
-    .get();
-  if (laterEvent) return { revertible: false, reason: "The branch changed after this settlement" };
-  return { revertible: true, reason: null };
-}
-
-/** Put a wrongly settled ticket back to PENDING and restore the branch exactly. */
-export function revertSettlement(
-  db: Db,
-  input: z.input<typeof revertSettlementSchema>,
-  now = new Date(),
-) {
-  const data = parseInput(revertSettlementSchema, input);
-  const settings = getSettings(db);
-  const fmt = moneyFormatter(settings);
-  return db.transaction((tx) => {
-    const check = checkRevertible(tx, data.betId);
-    if (!check.revertible)
-      throw new DomainError("NOT_REVERTIBLE", check.reason ?? "Not revertible");
-    const bet = getBetOrThrow(tx, data.betId);
-    const branch = getBranchOrThrow(tx, bet.branchId);
-    const previous = bet.result;
-    const restoredCapital = bet.capitalBeforeCents;
-    const delta = restoredCapital - branch.currentCapitalCents;
-    const restoredStatus =
-      previous === "LOST" && branch.status === "DEAD"
-        ? branch.maturedAt
-          ? "MATURE"
-          : "ACTIVE"
-        : branch.status;
-
-    const peak = tx
-      .select({ value: max(bets.capitalAfterCents) })
-      .from(bets)
-      .where(and(eq(bets.branchId, branch.id), ne(bets.id, bet.id)))
-      .get();
-    const previousSettled = tx
-      .select({ settledAt: bets.settledAt })
-      .from(bets)
-      .where(and(eq(bets.branchId, branch.id), ne(bets.id, bet.id), isNull(bets.cancelledAt)))
-      .orderBy(desc(bets.sequence))
-      .get();
-
-    tx.update(bets)
-      .set({
-        result: "PENDING",
-        settledAt: null,
-        actualReturnCents: null,
-        profitLossCents: null,
-        capitalAfterCents: null,
-        countsAsRound: null,
-        updatedAt: now,
-      })
-      .where(eq(bets.id, bet.id))
-      .run();
-    tx.update(branches)
-      .set({
-        currentCapitalCents: restoredCapital,
-        status: restoredStatus,
-        wins: branch.wins - (previous === "WON" ? 1 : 0),
-        losses: branch.losses - (previous === "LOST" ? 1 : 0),
-        voids: branch.voids - (previous === "VOID" ? 1 : 0),
-        roundCount: branch.roundCount - (bet.countsAsRound ? 1 : 0),
-        totalLostCents: branch.totalLostCents - (previous === "LOST" ? bet.stakeCents : 0),
-        peakCapitalCents: Math.max(branch.birthCapitalCents, peak?.value ?? 0, restoredCapital),
-        diedAt: restoredStatus === "DEAD" ? branch.diedAt : null,
-        lastRoundAt: previousSettled?.settledAt ?? null,
-        updatedAt: now,
-      })
-      .where(eq(branches.id, branch.id))
-      .run();
-    insertEvent(tx, {
-      branchId: branch.id,
-      type: "MANUAL_ADJUSTMENT",
-      createdAt: now,
-      amountCents: Math.abs(delta),
-      capitalDeltaCents: delta,
-      capitalAfterCents: restoredCapital,
-      statusAfter: restoredStatus,
-      relatedBetId: bet.id,
-      description: `Settlement of ${settings.roundShortLabel}${bet.roundNumber} reverted (${previous} → PENDING), capital ${fmt(
-        delta,
-        true,
-      )} — ${data.reason}`,
-      metadata: { kind: "SETTLEMENT_REVERTED", previousResult: previous, reason: data.reason },
-    });
-    return getBetOrThrow(tx, bet.id);
-  });
+  return bet;
 }

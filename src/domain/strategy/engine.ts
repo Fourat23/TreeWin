@@ -31,8 +31,8 @@ import { getProfileRules, type StrategySettings } from "./settings";
  *
  * Win evaluation order:
  *   1. capital = capital − stake + stake × odds (real ticket odds, cent-rounded)
- *   2. ACTIVE branches: harvest every milestone reached, in order — P1 first, then profile
- *      thresholds below the cap (several may fire in one round; bounded loop)
+ *   2. ACTIVE branches: at most ONE milestone per round — P1 if not done yet, otherwise the
+ *      next profile threshold strictly below the cap
  *   3. ACTIVE branches reaching the cap become MATURE; MATURE branches keep their principal
  *      at the cap and split the excess (mature.bankShareBp to BANK, the rest to a child).
  */
@@ -150,9 +150,6 @@ export class EngineError extends Error {
     this.name = "EngineError";
   }
 }
-
-/** Upper bound on harvests in one round — protects against pathological settings. */
-const MAX_HARVESTS_PER_ROUND = 16;
 
 function assertSettleable(branch: BranchState, ticket: TicketState): void {
   if (branch.status !== "ACTIVE" && branch.status !== "MATURE") {
@@ -389,21 +386,23 @@ export function evaluateBranchAfterWin(
   const capCents = branch.capCents;
 
   if (branch.status === "ACTIVE") {
-    for (let guard = 0; guard < MAX_HARVESTS_PER_ROUND; guard += 1) {
-      const milestone = nextMilestone(
-        {
-          profile: branch.profile,
-          status: "ACTIVE",
-          birthCapitalCents: branch.birthCapitalCents,
-          currentCapitalCents: b.capital,
-          capCents,
-          p1Done,
-          thresholdLevel,
-          wins,
-        },
-        settings,
-      );
-      if (!isMilestoneReached(milestone, b.capital, wins)) break;
+    // V1 rule: at most ONE milestone per won round — P1 if still pending, otherwise at most
+    // one profile threshold. A branch that is still above the next threshold harvests it on
+    // a later won round; there is never a cascade of harvests from a single ticket.
+    const milestone = nextMilestone(
+      {
+        profile: branch.profile,
+        status: "ACTIVE",
+        birthCapitalCents: branch.birthCapitalCents,
+        currentCapitalCents: b.capital,
+        capCents,
+        p1Done,
+        thresholdLevel,
+        wins,
+      },
+      settings,
+    );
+    if (isMilestoneReached(milestone, b.capital, wins)) {
       if (milestone.kind === "P1") {
         b.harvest({
           kind: "P1",
@@ -428,9 +427,8 @@ export function evaluateBranchAfterWin(
           title: harvestTitle(milestone, base, b),
         });
         thresholdLevel += 1;
-      } else {
-        break; // CAP is handled below.
       }
+      // CAP is handled below.
     }
 
     if (b.capital >= capCents) {

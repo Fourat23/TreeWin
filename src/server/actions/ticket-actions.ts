@@ -1,53 +1,59 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
 import type { CreateTicketInput, UpdateTicketDetailsInput } from "@/domain/bets/tickets";
 import type { SettlementPlan } from "@/domain/strategy/engine";
-import { getDb } from "../db";
-import type { PlayableBranchDTO } from "../queries/dto";
 import { listPlayableBranches } from "../queries/branches";
+import type { PlayableBranchDTO } from "../queries/dto";
 import {
   cancelPendingTicket,
   checkTicketConflicts,
   createTicket,
   previewSettlement,
-  revertSettlement,
   settleTicket,
   updateTicketDetails,
   type SettleTicketInput,
   type TicketConflicts,
 } from "../services/bet-service";
 import { linkCandidateToBet } from "../services/candidate-service";
-import { runAction, type ActionResult } from "./result";
+import { getBranchOrThrow } from "../services/internal";
+import type { ActionResult } from "./result";
+import { mutateAction, readAction } from "./workspace-op";
 
-function refresh() {
-  revalidatePath("/", "layout");
+export async function listPlayableBranchesAction(
+  workspace: string,
+): Promise<ActionResult<PlayableBranchDTO[]>> {
+  return readAction(workspace, (state) => listPlayableBranches(state));
 }
 
-export async function listPlayableBranchesAction(): Promise<ActionResult<PlayableBranchDTO[]>> {
-  return runAction(() => listPlayableBranches(getDb()));
-}
-
-export async function checkTicketConflictsAction(input: {
-  eventName: string;
-  eventDate: string;
-  branchId?: string;
-}): Promise<ActionResult<TicketConflicts>> {
-  return runAction(() => checkTicketConflicts(getDb(), input));
+export async function checkTicketConflictsAction(
+  workspace: string,
+  input: { eventName: string; eventDate: string; branchId?: string; excludeBetId?: string },
+): Promise<ActionResult<TicketConflicts>> {
+  return readAction(workspace, (state) => checkTicketConflicts(state, input, new Date()));
 }
 
 export async function createTicketAction(
+  workspace: string,
   input: CreateTicketInput & { candidateId?: string },
-): Promise<ActionResult<{ betId: string; roundNumber: number; warnings: string[] }>> {
+): Promise<
+  ActionResult<{ betId: string; roundNumber: number; warnings: string[]; label: string }>
+> {
   const { candidateId, ...ticket } = input;
-  const result = runAction(() => {
-    const db = getDb();
-    const { bet, warnings } = createTicket(db, ticket);
-    if (candidateId) linkCandidateToBet(db, candidateId, bet.id);
-    return { betId: bet.id, roundNumber: bet.roundNumber, warnings };
-  });
-  if (result.ok) refresh();
-  return result;
+  return mutateAction(
+    workspace,
+    (state, ctx) => {
+      const { bet, warnings } = createTicket(state, ticket, ctx);
+      if (candidateId) linkCandidateToBet(state, candidateId, bet.id, ctx);
+      const code = getBranchOrThrow(state, bet.branchId).code;
+      return {
+        betId: bet.id,
+        roundNumber: bet.roundNumber,
+        warnings,
+        label: `Created ticket ${code}·${state.settings.roundShortLabel}${bet.roundNumber} (${bet.eventName})`,
+      };
+    },
+    (r) => r.label,
+  );
 }
 
 export interface SettlementPreviewData {
@@ -62,10 +68,11 @@ export interface SettlementPreviewData {
 }
 
 export async function previewSettlementAction(
+  workspace: string,
   input: SettleTicketInput,
 ): Promise<ActionResult<SettlementPreviewData>> {
-  return runAction(() => {
-    const { bet, branch, plan } = previewSettlement(getDb(), input);
+  return readAction(workspace, (state) => {
+    const { bet, branch, plan } = previewSettlement(state, input);
     return {
       branchCode: branch.code,
       eventName: bet.eventName,
@@ -80,45 +87,61 @@ export async function previewSettlementAction(
 }
 
 export async function settleTicketAction(
+  workspace: string,
   input: SettleTicketInput,
 ): Promise<
-  ActionResult<{ branchCode: string; childCodes: string[]; died: boolean; matured: boolean }>
+  ActionResult<{
+    branchCode: string;
+    childCodes: string[];
+    died: boolean;
+    matured: boolean;
+    label: string;
+  }>
 > {
-  const result = runAction(() => {
-    const outcome = settleTicket(getDb(), input);
-    return {
-      branchCode: outcome.branch.code,
-      childCodes: outcome.plan.children.map((c) => c.code),
-      died: outcome.plan.died,
-      matured: outcome.plan.matured,
-    };
-  });
-  if (result.ok) refresh();
-  return result;
+  return mutateAction(
+    workspace,
+    (state, ctx) => {
+      const outcome = settleTicket(state, input, ctx);
+      return {
+        branchCode: outcome.branch.code,
+        childCodes: outcome.plan.children.map((c) => c.code),
+        died: outcome.plan.died,
+        matured: outcome.plan.matured,
+        label: `Settled ${outcome.branch.code}·${state.settings.roundShortLabel}${outcome.bet.roundNumber} as ${outcome.plan.result}`,
+      };
+    },
+    (r) => r.label,
+  );
 }
 
-export async function cancelTicketAction(input: {
-  betId: string;
-  reason: string;
-}): Promise<ActionResult> {
-  const result = runAction(() => void cancelPendingTicket(getDb(), input));
-  if (result.ok) refresh();
-  return result;
+export async function cancelTicketAction(
+  workspace: string,
+  input: { betId: string; reason: string },
+): Promise<ActionResult<{ label: string }>> {
+  return mutateAction(
+    workspace,
+    (state, ctx) => {
+      const bet = cancelPendingTicket(state, input, ctx);
+      const code = getBranchOrThrow(state, bet.branchId).code;
+      return {
+        label: `Cancelled pending ticket ${code}·${state.settings.roundShortLabel}${bet.roundNumber}`,
+      };
+    },
+    (r) => r.label,
+  );
 }
 
 export async function updateTicketAction(
+  workspace: string,
   input: UpdateTicketDetailsInput & { override?: { confirmed: true; reason: string } },
-): Promise<ActionResult> {
-  const result = runAction(() => void updateTicketDetails(getDb(), input));
-  if (result.ok) refresh();
-  return result;
-}
-
-export async function revertSettlementAction(input: {
-  betId: string;
-  reason: string;
-}): Promise<ActionResult> {
-  const result = runAction(() => void revertSettlement(getDb(), input));
-  if (result.ok) refresh();
-  return result;
+): Promise<ActionResult<{ label: string }>> {
+  return mutateAction(
+    workspace,
+    (state, ctx) => {
+      const bet = updateTicketDetails(state, input, ctx);
+      const code = getBranchOrThrow(state, bet.branchId).code;
+      return { label: `Edited ticket ${code}·${state.settings.roundShortLabel}${bet.roundNumber}` };
+    },
+    (r) => r.label,
+  );
 }

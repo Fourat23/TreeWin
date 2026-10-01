@@ -4,6 +4,7 @@ import {
   CircleDot,
   CircleX,
   Crown,
+  FlaskConical,
   Hourglass,
   Pause,
   Skull,
@@ -93,6 +94,16 @@ export function ResultBadge({
     <Badge tone={tone}>
       <Icon aria-hidden />
       {RESULT_LABEL[result]}
+    </Badge>
+  );
+}
+
+/** Ticket recorded outside the V1 rules (explicit DEMO experiment). */
+export function OutsideV1Badge({ reason }: { reason: string | null }) {
+  return (
+    <Badge tone="warning" title={reason ?? undefined}>
+      <FlaskConical aria-hidden />
+      Outside V1
     </Badge>
   );
 }

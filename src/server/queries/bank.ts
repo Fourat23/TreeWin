@@ -1,12 +1,17 @@
-import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Cents } from "@/domain/money";
-import { BANK_DESTINATIONS, PROFILES, type BankDestination, type Profile } from "@/domain/types";
-import type { DbOrTx } from "../db/client";
-import { bankTransactions, bets, branches } from "../db/schema";
+import {
+  BANK_DESTINATIONS,
+  BANK_STATUSES,
+  PROFILES,
+  type BankDestination,
+  type Profile,
+} from "@/domain/types";
+import { bankStatusTotals, type BankStatusTotals } from "../services/bank-service";
 import { localDay } from "../services/internal";
+import type { WorkspaceState } from "../state/schema";
 import type { BankTransactionDTO } from "./dto";
-import { toBankDTO } from "./mappers";
+import { indexState, toBankDTO } from "./mappers";
 import { periodTotals, type PeriodTotals } from "./overview";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -15,6 +20,7 @@ export const bankFiltersSchema = z.object({
   branch: z.string().trim().max(40).optional().catch(undefined),
   profile: z.enum(PROFILES).optional().catch(undefined),
   destination: z.enum(BANK_DESTINATIONS).optional().catch(undefined),
+  status: z.enum(BANK_STATUSES).optional().catch(undefined),
   from: z.string().regex(ISO_DATE).optional().catch(undefined),
   to: z.string().regex(ISO_DATE).optional().catch(undefined),
 });
@@ -22,6 +28,7 @@ export type BankFilters = z.output<typeof bankFiltersSchema>;
 
 export interface BankDTO {
   totalCents: Cents;
+  status: BankStatusTotals;
   periods: PeriodTotals;
   filteredTotalCents: Cents;
   transactions: BankTransactionDTO[];
@@ -34,7 +41,7 @@ export interface BankDTO {
   }[];
   byProfile: { profile: Profile; amountCents: Cents; count: number }[];
   byDestination: { destination: BankDestination; amountCents: Cents; count: number }[];
-  series: { day: string; cumulativeCents: Cents }[];
+  series: { day: string; cumulativeCents: Cents; withdrawnCents: Cents }[];
   branchCodes: string[];
 }
 
@@ -43,39 +50,29 @@ function localDateBoundary(day: string, endOfDay: boolean): Date {
   return new Date(y, m - 1, d + (endOfDay ? 1 : 0));
 }
 
-export function getBankData(db: DbOrTx, filters: BankFilters, now = new Date()): BankDTO {
-  const all = db
-    .select({
-      tx: bankTransactions,
-      code: branches.code,
-      round: bets.roundNumber,
-      eventName: bets.eventName,
-    })
-    .from(bankTransactions)
-    .innerJoin(branches, eq(bankTransactions.branchId, branches.id))
-    .leftJoin(bets, eq(bankTransactions.relatedBetId, bets.id))
-    .orderBy(desc(bankTransactions.createdAt))
-    .all();
+export function getBankData(
+  state: WorkspaceState,
+  filters: BankFilters,
+  now = new Date(),
+): BankDTO {
+  const { branchById, betById } = indexState(state);
+  const all = [...state.bankTransactions].sort((a, b) => b.createdAt - a.createdAt);
+  const codeOf = (branchId: string) => branchById.get(branchId)?.code ?? "?";
 
   const fromMs = filters.from ? localDateBoundary(filters.from, false).getTime() : -Infinity;
   const toMs = filters.to ? localDateBoundary(filters.to, true).getTime() : Infinity;
-  const filtered = all.filter((r) => {
-    const at = r.tx.createdAt.getTime();
-    return (
-      at >= fromMs &&
-      at < toMs &&
-      (!filters.branch || r.code === filters.branch.toUpperCase()) &&
-      (!filters.profile || r.tx.profile === filters.profile) &&
-      (!filters.destination || r.tx.destination === filters.destination)
-    );
-  });
+  const filtered = all.filter(
+    (t) =>
+      t.createdAt >= fromMs &&
+      t.createdAt < toMs &&
+      (!filters.branch || codeOf(t.branchId) === filters.branch.toUpperCase()) &&
+      (!filters.profile || t.profile === filters.profile) &&
+      (!filters.destination || t.destination === filters.destination) &&
+      (!filters.status || t.status === filters.status),
+  );
 
-  const transactions = filtered.map((r) =>
-    toBankDTO(
-      r.tx,
-      r.code,
-      r.round !== null ? { roundNumber: r.round, eventName: r.eventName ?? "" } : null,
-    ),
+  const transactions = filtered.map((t) =>
+    toBankDTO(t, codeOf(t.branchId), t.relatedBetId ? betById.get(t.relatedBetId) : null),
   );
 
   const byBranchMap = new Map<string, BankDTO["byBranch"][number]>();
@@ -92,20 +89,31 @@ export function getBankData(db: DbOrTx, filters: BankFilters, now = new Date()):
     byBranchMap.set(t.branchId, entry);
   }
 
-  const chronological = [...all].reverse();
-  let cumulative = 0;
-  const seriesMap = new Map<string, Cents>();
-  for (const r of chronological) {
-    cumulative += r.tx.amountCents;
-    seriesMap.set(localDay(r.tx.createdAt), cumulative);
+  // Cumulative secured vs withdrawn, per day.
+  const deltas = new Map<string, { secured: Cents; withdrawn: Cents }>();
+  const bump = (day: string, key: "secured" | "withdrawn", amount: Cents) => {
+    const entry = deltas.get(day) ?? { secured: 0, withdrawn: 0 };
+    entry[key] += amount;
+    deltas.set(day, entry);
+  };
+  for (const t of all) {
+    bump(localDay(new Date(t.createdAt)), "secured", t.amountCents);
+    if (t.withdrawnAt !== null) bump(localDay(new Date(t.withdrawnAt)), "withdrawn", t.amountCents);
   }
+  let secured = 0;
+  let withdrawn = 0;
+  const series = [...deltas.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([day, d]) => {
+      secured += d.secured;
+      withdrawn += d.withdrawn;
+      return { day, cumulativeCents: secured, withdrawnCents: withdrawn };
+    });
 
   return {
-    totalCents: all.reduce((s, r) => s + r.tx.amountCents, 0),
-    periods: periodTotals(
-      all.map((r) => ({ amountCents: r.tx.amountCents, createdAt: r.tx.createdAt.getTime() })),
-      now,
-    ),
+    totalCents: all.reduce((s, t) => s + t.amountCents, 0),
+    status: bankStatusTotals(state),
+    periods: periodTotals(all, now),
     filteredTotalCents: transactions.reduce((s, t) => s + t.amountCents, 0),
     transactions,
     byBranch: [...byBranchMap.values()].sort((a, b) => b.amountCents - a.amountCents),
@@ -125,7 +133,7 @@ export function getBankData(db: DbOrTx, filters: BankFilters, now = new Date()):
         count: ofDestination.length,
       };
     }),
-    series: [...seriesMap.entries()].map(([day, cumulativeCents]) => ({ day, cumulativeCents })),
-    branchCodes: [...new Set(all.map((r) => r.code))].sort(),
+    series,
+    branchCodes: [...new Set(all.map((t) => codeOf(t.branchId)))].sort(),
   };
 }

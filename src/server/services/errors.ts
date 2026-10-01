@@ -3,10 +3,10 @@ export type DomainErrorCode =
   | "VALIDATION"
   | "INVALID_STATE"
   | "PENDING_EXISTS"
-  | "SAME_EVENT_CONFLICT"
-  | "LIMIT_REACHED"
-  | "NOT_REVERTIBLE"
-  | "IMPORT_REJECTED";
+  | "POLICY_VIOLATION"
+  | "IMPORT_REJECTED"
+  | "WORKSPACE_MISMATCH"
+  | "STATE_INVALID";
 
 /** Business-rule violation surfaced to the UI with a stable code. */
 export class DomainError extends Error {

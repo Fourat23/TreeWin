@@ -17,13 +17,5 @@ export default defineConfig([
       "no-console": ["warn", { allow: ["warn", "error", "info"] }],
     },
   },
-  globalIgnores([
-    ".next/**",
-    "out/**",
-    "build/**",
-    "next-env.d.ts",
-    "data/**",
-    "coverage/**",
-    "drizzle/**",
-  ]),
+  globalIgnores([".next/**", "out/**", "build/**", "next-env.d.ts", "data/**", "coverage/**"]),
 ]);

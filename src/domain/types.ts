@@ -3,6 +3,13 @@
  * Declared as const tuples so they can feed both TypeScript types and Zod/Drizzle enums.
  */
 
+/**
+ * Two strictly separate workspaces. REAL holds only genuine, manually entered data and applies
+ * the V1 rules strictly; DEMO holds seeded demonstration data and allows explicit experiments.
+ */
+export const WORKSPACES = ["REAL", "DEMO"] as const;
+export type Workspace = (typeof WORKSPACES)[number];
+
 export const PROFILES = ["HARVEST", "BALANCED", "GROWTH"] as const;
 export type Profile = (typeof PROFILES)[number];
 
@@ -39,6 +46,13 @@ export type BankTxType = (typeof BANK_TX_TYPES)[number];
 
 export const BANK_DESTINATIONS = ["UNALLOCATED", "LIVRET_A", "PEA", "CTO", "OTHER"] as const;
 export type BankDestination = (typeof BANK_DESTINATIONS)[number];
+
+/**
+ * SECURED: the money left the branch ecosystem for good (it may still sit on Winamax).
+ * WITHDRAWN: it has actually been withdrawn from Winamax. Neither can ever fund a branch.
+ */
+export const BANK_STATUSES = ["SECURED", "WITHDRAWN"] as const;
+export type BankStatus = (typeof BANK_STATUSES)[number];
 
 export const PROTOCOL_STATUSES = ["ELIGIBLE", "WATCH", "REJECTED", "MANUAL"] as const;
 export type ProtocolStatus = (typeof PROTOCOL_STATUSES)[number];

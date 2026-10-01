@@ -12,6 +12,7 @@ import { Input, Select } from "@/components/ui/field";
 import { EmptyState, Segmented } from "@/components/ui/misc";
 import { PROFILE_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/cn";
+import { withWorkspace } from "@/lib/workspace";
 import type { BranchSummaryDTO } from "@/server/queries/dto";
 import type { StatusFilter } from "@/components/tree/tree-model";
 
@@ -29,7 +30,7 @@ const ACCESSORS: Record<SortKey, (b: BranchSummaryDTO) => number | string> = {
 
 export function BranchesTable({ branches }: { branches: BranchSummaryDTO[] }) {
   const f = useFormat();
-  const { openBranch } = useUi();
+  const { openBranch, workspace } = useUi();
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("ALL");
   const [profile, setProfile] = useState<Profile | "">("");
@@ -143,7 +144,7 @@ export function BranchesTable({ branches }: { branches: BranchSummaryDTO[] }) {
         </Select>
         <span className="ml-auto num text-sm text-fg-muted">{rows.length} branches</span>
         <Button variant="ghost" size="sm" asChild>
-          <a href="/api/export/csv/branches" download>
+          <a href={withWorkspace("/api/export/csv/branches", workspace)} download>
             <Download /> CSV
           </a>
         </Button>

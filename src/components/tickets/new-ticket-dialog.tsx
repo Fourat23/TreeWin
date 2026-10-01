@@ -1,7 +1,7 @@
 "use client";
 
-import { ArrowLeft, Search, ShieldAlert, TriangleAlert } from "lucide-react";
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { ArrowLeft, FlaskConical, Lock, Search, ShieldAlert, TriangleAlert } from "lucide-react";
+import { useEffect, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { centsToDecimalString, formatOdds } from "@/domain/money";
 import { PROTOCOL_STATUSES, type Checklist, type ProtocolStatus } from "@/domain/types";
@@ -16,6 +16,7 @@ import { Segmented } from "@/components/ui/misc";
 import { todayIso } from "@/lib/dates";
 import { cn } from "@/lib/cn";
 import type { PlayableBranchDTO } from "@/server/queries/dto";
+import type { PolicyViolation, TicketRules } from "@/domain/bets/policy";
 import type { TicketConflicts } from "@/server/services/bet-service";
 import {
   checkTicketConflictsAction,
@@ -126,19 +127,20 @@ function NewTicketFlow({
   onCreated: () => void;
 }) {
   const f = useFormat();
+  const { workspace } = useUi();
   const [branches, setBranches] = useState<PlayableBranchDTO[] | null>(null);
   const [branchId, setBranchId] = useState<string | null>(request.branchId ?? null);
   const [query, setQuery] = useState("");
 
   useEffect(() => {
     let active = true;
-    void listPlayableBranchesAction().then((result) => {
+    void listPlayableBranchesAction(workspace).then((result) => {
       if (active) setBranches(result.ok ? result.data : []);
     });
     return () => {
       active = false;
     };
-  }, []);
+  }, [workspace]);
 
   const branch = branches?.find((b) => b.id === branchId) ?? null;
   const filtered = (branches ?? []).filter((b) =>
@@ -229,7 +231,8 @@ function TicketForm({
   onCreated: () => void;
 }) {
   const f = useFormat();
-  const { hints } = useUi();
+  const { hints, workspace } = useUi();
+  const real = workspace === "REAL";
   const [form, setForm] = useState<FormState>(() => ({
     ...initialForm(prefill),
     stake: centsToDecimalString(branch.suggestedStakeCents),
@@ -237,47 +240,58 @@ function TicketForm({
   const [showDetails, setShowDetails] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [conflicts, setConflicts] = useState<TicketConflicts | null>(null);
-  const [blocking, setBlocking] = useState<string[] | null>(null);
+  const [serverViolations, setServerViolations] = useState<PolicyViolation[] | null>(null);
   const [overrideReason, setOverrideReason] = useState("");
   const [overrideConfirmed, setOverrideConfirmed] = useState(false);
   const [pending, startTransition] = useTransition();
 
-  const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
+  const set = <K extends keyof FormState>(key: K, value: FormState[K]) => {
+    setServerViolations(null);
     setForm((prev) => ({ ...prev, [key]: value }));
+  };
 
-  const preview = useMemo(
-    () =>
-      computeTicketPreview({
-        capitalCents: branch.currentCapitalCents,
-        suggestedStakeCents: branch.suggestedStakeCents,
-        stake: form.stake,
-        odds: form.odds,
-        oddsMinBp: hints.oddsMinBp,
-        oddsMaxBp: hints.oddsMaxBp,
-      }),
-    [branch, form.stake, form.odds, hints.oddsMinBp, hints.oddsMaxBp],
-  );
+  const corridor = hints.corridors[branch.profile];
+  const rules: TicketRules = {
+    oddsMinBp: hints.oddsMinBp,
+    oddsMaxBp: hints.oddsMaxBp,
+    corridor,
+    sameEventPolicy: hints.sameEventPolicy,
+    maxPendingTickets: conflicts?.maxPendingTickets ?? null,
+    maxTicketsPerDay: conflicts?.maxTicketsPerDay ?? null,
+  };
+  const sameEvent = form.eventName.trim().length >= 3 ? (conflicts?.sameEvent ?? []) : [];
+  // REAL: the stake is fixed by the V1 rule (whole capital / capped principal).
+  const stakeText = real ? centsToDecimalString(branch.suggestedStakeCents) : form.stake;
+  const preview = computeTicketPreview({
+    workspace,
+    branch,
+    rules,
+    stake: stakeText,
+    odds: form.odds,
+    sameEventBranchCodes: sameEvent.map((c) => c.branchCode),
+    pendingLimitReached: conflicts?.pendingLimitReached ?? false,
+    dailyLimitReached: conflicts?.dailyLimitReached ?? false,
+  });
 
   // Live same-match check (debounced).
   useEffect(() => {
     const name = form.eventName.trim();
     if (name.length < 3 || !form.eventDate) return;
     const timer = window.setTimeout(() => {
-      void checkTicketConflictsAction({
+      void checkTicketConflictsAction(workspace, {
         eventName: name,
         eventDate: form.eventDate,
         branchId: branch.id,
       }).then((result) => setConflicts(result.ok ? result.data : null));
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [form.eventName, form.eventDate, branch.id]);
+  }, [form.eventName, form.eventDate, branch.id, workspace]);
 
-  const sameEvent = form.eventName.trim().length >= 3 ? (conflicts?.sameEvent ?? []) : [];
-  const limitBlocking = conflicts && (conflicts.pendingLimitReached || conflicts.dailyLimitReached);
-  const needsOverride =
-    (sameEvent.length > 0 && hints.sameEventPolicy === "BLOCK") ||
-    Boolean(limitBlocking) ||
-    blocking !== null;
+  const violations = serverViolations ?? preview.violations;
+  const blockers = violations.filter((v) => !v.overridable);
+  const overridable = violations.filter((v) => v.overridable);
+  const needsOverride = blockers.length === 0 && overridable.length > 0;
+  const outsideV1 = overridable.some((v) => v.code !== "PENDING_LIMIT" && v.code !== "DAILY_LIMIT");
 
   function submit() {
     const nextErrors: Record<string, string> = {};
@@ -289,6 +303,7 @@ function TicketForm({
     for (const key of ["eventName", "competition", "selection", "marketName", "sport"] as const) {
       if (!form[key].trim()) nextErrors[key] = "Required";
     }
+    if (blockers.length > 0) nextErrors.form = blockers.map((b) => b.message).join(" · ");
     if (needsOverride && (!overrideConfirmed || overrideReason.trim().length < 3)) {
       nextErrors.override = "Confirm the override and give a reason";
     }
@@ -303,7 +318,7 @@ function TicketForm({
     const stakeCents = preview.stakeCents;
     const oddsBp = preview.oddsBp;
     startTransition(async () => {
-      const result = await createTicketAction({
+      const result = await createTicketAction(workspace, {
         branchId: branch.id,
         candidateId,
         sport: form.sport,
@@ -331,12 +346,17 @@ function TicketForm({
         onCreated();
         return;
       }
-      if (result.code === "SAME_EVENT_CONFLICT" || result.code === "LIMIT_REACHED") {
-        const reasons = (result.details?.reasons as string[] | undefined) ?? [result.message];
-        setBlocking(reasons);
-        setErrors({
-          override: "This ticket is blocked by a protection. Override explicitly or change it.",
-        });
+      if (result.code === "POLICY_VIOLATION") {
+        const list = (result.details?.violations as PolicyViolation[] | undefined) ?? [];
+        setServerViolations(list);
+        setErrors(
+          list.some((v) => !v.overridable)
+            ? { form: list.map((v) => v.message).join(" · ") }
+            : {
+                override:
+                  "Blocked by a rule. Override explicitly (journaled) or change the ticket.",
+              },
+        );
         return;
       }
       const issues =
@@ -464,13 +484,30 @@ function TicketForm({
               />
             )}
           </Field>
-          <Field label="Stake" error={errors.stake ?? preview.stakeError}>
+          <Field
+            label={
+              real ? (
+                <span className="flex items-center gap-1">
+                  Stake <Lock className="size-3" aria-label="fixed by the V1 rule" />
+                </span>
+              ) : (
+                "Stake"
+              )
+            }
+            error={errors.stake ?? preview.stakeError}
+          >
             {(p) => (
               <AmountInput
                 {...p}
                 suffix="€"
-                value={form.stake}
+                value={stakeText}
+                readOnly={real}
+                title={
+                  real ? "V1 rule: the whole capital (capped principal when mature)" : undefined
+                }
+                className={real ? "cursor-not-allowed opacity-80" : undefined}
                 onChange={(e) => set("stake", e.target.value)}
+                data-testid="ticket-stake"
               />
             )}
           </Field>
@@ -532,24 +569,49 @@ function TicketForm({
               <p className="text-fg-muted">
                 {sameEvent.map((s) => `${s.branchCode} (${s.selection})`).join(", ")} — correlated
                 branches can die together.{" "}
-                {hints.sameEventPolicy === "BLOCK"
-                  ? "Blocked unless you explicitly override."
-                  : "Warning only."}
+                {hints.sameEventPolicy !== "BLOCK"
+                  ? "Warning only."
+                  : real
+                    ? "Refused in REAL: one branch per match."
+                    : "Blocked unless you explicitly override (DEMO)."}
               </p>
             </div>
           </div>
         ) : null}
 
-        {needsOverride ? (
-          <div className="flex flex-col gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-3">
-            {blocking?.map((reason) => (
-              <p key={reason} className="text-sm text-fg">
-                {reason}
+        {blockers.length > 0 ? (
+          <div
+            role="alert"
+            className="flex flex-col gap-1 rounded-lg border border-critical/40 bg-critical/8 px-3 py-2.5 text-sm"
+          >
+            <p className="flex items-center gap-2 font-medium text-critical">
+              <ShieldAlert className="size-4" /> Refused by the V1 rules
+              {real ? " (REAL workspace — no override)" : ""}
+            </p>
+            {blockers.map((v) => (
+              <p key={v.code} className="text-fg-muted">
+                {v.message}
               </p>
             ))}
-            {limitBlocking && !blocking ? (
-              <p className="text-sm text-fg">A configured ticket limit is reached.</p>
-            ) : null}
+          </div>
+        ) : null}
+
+        {needsOverride ? (
+          <div
+            className="flex flex-col gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-3"
+            data-testid="override-box"
+          >
+            <p className="flex items-center gap-2 text-sm font-semibold text-warning">
+              <FlaskConical className="size-4" />
+              {outsideV1
+                ? "Experiment outside the V1 rules — DEMO only"
+                : "Override a personal limit"}
+            </p>
+            {overridable.map((v) => (
+              <p key={v.code} className="text-sm text-fg">
+                {v.message}
+              </p>
+            ))}
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -557,7 +619,9 @@ function TicketForm({
                 checked={overrideConfirmed}
                 onChange={(e) => setOverrideConfirmed(e.target.checked)}
               />
-              I understand the risk and override this protection.
+              {outsideV1
+                ? "I deliberately record this ticket outside the V1 rules (it stays labelled as such)."
+                : "I understand the risk and override this limit."}
             </label>
             <Input
               value={overrideReason}
@@ -668,11 +732,18 @@ function TicketForm({
               }
             />
           </dl>
-          {branch.status === "MATURE" ? (
-            <p className="mt-3 text-xs text-fg-subtle">
-              Mature branch: strategy stake = cap {f.money(branch.capCents)}.
-            </p>
-          ) : null}
+          <p className="mt-3 text-xs text-fg-subtle">
+            {branch.status === "MATURE"
+              ? `Mature branch: V1 stake = capped principal ${f.money(branch.suggestedStakeCents)}.`
+              : `V1 stake = the whole capital ${f.money(branch.suggestedStakeCents)}.`}{" "}
+            {real
+              ? "If Winamax does not accept this amount, simply wait — no ticket is mandatory."
+              : ""}
+          </p>
+          <p className="mt-1 text-xs text-fg-subtle">
+            Odds: max {f.odds(hints.oddsMaxBp)} · {branch.profile.toLowerCase()} corridor{" "}
+            {f.odds(corridor.minBp)}–{f.odds(corridor.maxBp)} (informational)
+          </p>
         </div>
         {preview.warnings.map((w) => (
           <p key={w} className="flex gap-2 text-xs text-warning">
@@ -680,7 +751,7 @@ function TicketForm({
             {w}
           </p>
         ))}
-        <Button type="submit" variant="primary" size="lg" disabled={pending}>
+        <Button type="submit" variant="primary" size="lg" disabled={pending || blockers.length > 0}>
           {pending ? "Recording…" : "Create pending ticket"}
         </Button>
         <p className="text-[11px] leading-relaxed text-fg-subtle">

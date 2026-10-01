@@ -5,10 +5,17 @@ import type { Profile } from "../types";
 /**
  * Centralised, versioned strategy configuration.
  *
- * Every rule value used by the engine lives here (and in the `strategy_settings` table) —
+ * Every rule value used by the engine lives here (persisted in each workspace state file) —
  * nothing strategy-related is hard-coded elsewhere. Ratios are basis points (10_000 = 100 %
  * or a 1× multiple), money is integer cents, odds are basis points (1.30 = 13_000).
+ *
+ * `strategyVersion` names the rule baseline ("1.0" = final V1 rules). Every change of a
+ * strategy field also bumps the workspace's strategy revision; branches and tickets record
+ * the version/revision they were created under, so history is never reinterpreted.
  */
+
+/** Final V1 baseline. */
+export const STRATEGY_BASELINE_VERSION = "1.0";
 
 // Builders with human-readable bounds (values are stored scaled, messages speak in units).
 const multiple = (min: number, max: number) =>
@@ -78,11 +85,18 @@ export const profileRulesSchema = z
     childShareBp: share,
     /** Active-capital cap. Reaching it makes the branch MATURE. */
     capCents: money(100),
+    /** Informational odds corridor for this profile (the hard limit is `odds.maxBp`). */
+    oddsTargetMinBp: oddsBounds(10_100, 10_000_000),
+    oddsTargetMaxBp: oddsBounds(10_100, 10_000_000),
   })
   .strict()
   .refine((r) => r.bankShareBp + r.childShareBp < BP_SCALE, {
     error: "BANK share + child share must stay below 100 %",
     path: ["childShareBp"],
+  })
+  .refine((r) => r.oddsTargetMinBp <= r.oddsTargetMaxBp, {
+    error: "Corridor min must be ≤ max",
+    path: ["oddsTargetMaxBp"],
   });
 
 export type ProfileRules = z.infer<typeof profileRulesSchema>;
@@ -92,6 +106,10 @@ const profileRecord = <T extends z.ZodType>(schema: T) =>
 
 export const strategySettingsSchema = z
   .object({
+    strategyVersion: z
+      .string()
+      .trim()
+      .regex(/^\d+\.\d+$/, { error: "Version like 1.0" }),
     currency: z.string().regex(/^[A-Z]{3}$/, { error: "ISO 4217 code, e.g. EUR" }),
     locale: z.string().min(2).max(20),
     roundLabel: z.string().trim().min(1).max(20),
@@ -111,6 +129,10 @@ export const strategySettingsSchema = z
       .strict(),
     /** Child amounts below this are sent to BANK instead of creating a dust branch. */
     minChildCapitalCents: money(0),
+    /**
+     * Protocol odds range. `maxBp` is a HARD limit in the REAL workspace (V1: 1.30);
+     * below `minBp` is only a warning.
+     */
     odds: z
       .object({ minBp: oddsBounds(10_100, 10_000_000), maxBp: oddsBounds(10_100, 10_000_000) })
       .strict()
@@ -124,12 +146,15 @@ export const strategySettingsSchema = z
     sameEventPolicy: z.enum(SAME_EVENT_POLICIES),
     voidCountsAsRound: z.boolean(),
     analytics: z.object({ minSampleSize: count(1, 10_000) }).strict(),
+    /** Automatic snapshots kept per workspace (manual backups are never deleted). */
+    backups: z.object({ keepAutomatic: count(1, 1_000) }).strict(),
   })
   .strict();
 
 export type StrategySettings = z.infer<typeof strategySettingsSchema>;
 
 export const DEFAULT_SETTINGS: StrategySettings = {
+  strategyVersion: STRATEGY_BASELINE_VERSION,
   currency: "EUR",
   locale: "fr-FR",
   roundLabel: "Round",
@@ -138,10 +163,12 @@ export const DEFAULT_SETTINGS: StrategySettings = {
   childProfileAssignment: "QUOTA",
   p1: {
     enabled: true,
-    trigger: "TARGET_PATH",
+    // Official V1: P1 when the real capital reaches 2.80 × S. TARGET_PATH / WIN_COUNT remain
+    // available as explicit alternatives.
+    trigger: "CAPITAL_MULTIPLE",
     targetOddsBp: 13_000,
     targetWins: 4,
-    capitalMultipleBp: 28_561,
+    capitalMultipleBp: 28_000,
     bankMultipleBp: 10_000,
     childMultipleBp: 10_000,
     minMotherRemainingBp: 1_000,
@@ -153,6 +180,8 @@ export const DEFAULT_SETTINGS: StrategySettings = {
       bankShareBp: 2_500,
       childShareBp: 2_500,
       capCents: 250_000,
+      oddsTargetMinBp: 11_800,
+      oddsTargetMaxBp: 12_400,
     },
     BALANCED: {
       firstThresholdBp: 60_000,
@@ -160,6 +189,8 @@ export const DEFAULT_SETTINGS: StrategySettings = {
       bankShareBp: 2_000,
       childShareBp: 2_000,
       capCents: 500_000,
+      oddsTargetMinBp: 12_200,
+      oddsTargetMaxBp: 12_700,
     },
     GROWTH: {
       firstThresholdBp: 100_000,
@@ -167,16 +198,37 @@ export const DEFAULT_SETTINGS: StrategySettings = {
       bankShareBp: 1_500,
       childShareBp: 1_500,
       capCents: 1_000_000,
+      oddsTargetMinBp: 12_500,
+      oddsTargetMaxBp: 13_000,
     },
   },
   mature: { bankShareBp: 5_000 },
   minChildCapitalCents: 100,
-  odds: { minBp: 11_500, maxBp: 13_500 },
+  odds: { minBp: 11_800, maxBp: 13_000 },
   limits: { maxPendingTickets: null, maxTicketsPerDay: null },
   sameEventPolicy: "BLOCK",
   voidCountsAsRound: false,
   analytics: { minSampleSize: 30 },
+  backups: { keepAutomatic: 50 },
 };
+
+/** Settings keys that only affect presentation or housekeeping (no strategy revision). */
+const NON_STRATEGY_KEYS = new Set<keyof StrategySettings>([
+  "currency",
+  "locale",
+  "roundLabel",
+  "roundShortLabel",
+  "analytics",
+  "backups",
+]);
+
+/** True when `next` changes at least one rule that affects money flows. */
+export function isStrategyChange(previous: StrategySettings, next: StrategySettings): boolean {
+  return (Object.keys(next) as (keyof StrategySettings)[]).some(
+    (key) =>
+      !NON_STRATEGY_KEYS.has(key) && JSON.stringify(previous[key]) !== JSON.stringify(next[key]),
+  );
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

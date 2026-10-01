@@ -1,5 +1,6 @@
 "use client";
 
+import { withWorkspace } from "@/lib/workspace";
 import { useUi } from "@/components/providers/ui-provider";
 import { Sheet } from "@/components/ui/sheet";
 import { useJson } from "@/lib/use-json";
@@ -14,9 +15,9 @@ export function BranchDrawer({
   branchId: string | null;
   onClose: () => void;
 }) {
-  const { dataVersion } = useUi();
+  const { dataVersion, workspace } = useUi();
   const { data, error, loading } = useJson<BranchDetailDTO>(
-    branchId ? `/api/branches/${encodeURIComponent(branchId)}` : null,
+    branchId ? withWorkspace(`/api/branches/${encodeURIComponent(branchId)}`, workspace) : null,
     dataVersion,
   );
   const title = data ? `Branch ${data.branch.code}` : "Branch";

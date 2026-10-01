@@ -1,12 +1,13 @@
 import { clvBp } from "@/domain/bets/tickets";
 import { lifetimeValueCents } from "@/domain/branches/metrics";
 import type {
-  BankTransactionRow,
-  BetRow,
-  BranchEventRow,
-  BranchRow,
-  CandidateRow,
-} from "../db/schema";
+  BankTransactionRecord,
+  BetRecord,
+  BranchEventRecord,
+  BranchRecord,
+  CandidateRecord,
+  WorkspaceState,
+} from "../state/schema";
 import type {
   BankTransactionDTO,
   BetDTO,
@@ -15,9 +16,36 @@ import type {
   CandidateDTO,
 } from "./dto";
 
-const ms = (date: Date | null): number | null => (date ? date.getTime() : null);
+/**
+ * Read-side index of a workspace state. States handed out by the repository are immutable,
+ * so the index is computed once per state object and cached.
+ */
+export interface StateIndex {
+  branchById: ReadonlyMap<string, BranchRecord>;
+  betById: ReadonlyMap<string, BetRecord>;
+  /** Branch ids holding an open (pending, not cancelled) ticket. */
+  pendingBranchIds: ReadonlySet<string>;
+}
 
-export function toBranchSummary(row: BranchRow, hasPendingTicket = false): BranchSummaryDTO {
+const indexCache = new WeakMap<WorkspaceState, StateIndex>();
+
+export function indexState(state: WorkspaceState): StateIndex {
+  const cached = indexCache.get(state);
+  if (cached) return cached;
+  const index: StateIndex = {
+    branchById: new Map(state.branches.map((b) => [b.id, b])),
+    betById: new Map(state.bets.map((b) => [b.id, b])),
+    pendingBranchIds: new Set(
+      state.bets
+        .filter((b) => b.result === "PENDING" && b.cancelledAt === null)
+        .map((b) => b.branchId),
+    ),
+  };
+  indexCache.set(state, index);
+  return index;
+}
+
+export function toBranchSummary(row: BranchRecord, hasPendingTicket = false): BranchSummaryDTO {
   return {
     id: row.id,
     code: row.code,
@@ -40,23 +68,28 @@ export function toBranchSummary(row: BranchRow, hasPendingTicket = false): Branc
     roundCount: row.roundCount,
     childCount: row.childCount,
     hasPendingTicket,
-    createdAt: row.createdAt.getTime(),
-    diedAt: ms(row.diedAt),
-    maturedAt: ms(row.maturedAt),
-    lastRoundAt: ms(row.lastRoundAt),
+    createdAt: row.createdAt,
+    diedAt: row.diedAt,
+    maturedAt: row.maturedAt,
+    lastRoundAt: row.lastRoundAt,
+    strategyVersion: row.strategyVersion,
+    strategyRevision: row.strategyRevision,
   };
 }
 
-export function toBetDTO(row: BetRow, branch: Pick<BranchRow, "code" | "profile">): BetDTO {
+export function toBetDTO(
+  row: BetRecord,
+  branch: Pick<BranchRecord, "code" | "profile"> | undefined,
+): BetDTO {
   return {
     id: row.id,
     branchId: row.branchId,
-    branchCode: branch.code,
-    branchProfile: branch.profile,
+    branchCode: branch?.code ?? "?",
+    branchProfile: branch?.profile ?? "BALANCED",
     sequence: row.sequence,
     roundNumber: row.roundNumber,
-    createdAt: row.createdAt.getTime(),
-    settledAt: ms(row.settledAt),
+    createdAt: row.createdAt,
+    settledAt: row.settledAt,
     eventDate: row.eventDate,
     eventTime: row.eventTime,
     sport: row.sport,
@@ -81,41 +114,46 @@ export function toBetDTO(row: BetRow, branch: Pick<BranchRow, "code" | "profile"
     notes: row.notes,
     protocolStatus: row.protocolStatus,
     confidence: row.confidence,
-    checklist: row.checklist ?? null,
+    checklist: row.checklist ? { ...row.checklist } : null,
     overrideReason: row.overrideReason,
-    cancelledAt: ms(row.cancelledAt),
+    outsideV1: row.outsideV1,
+    cancelledAt: row.cancelledAt,
     cancelReason: row.cancelReason,
+    strategyVersion: row.strategyVersion,
+    strategyRevision: row.strategyRevision,
   };
 }
 
 export function toEventDTO(
-  row: BranchEventRow,
-  codes: ReadonlyMap<string, Pick<BranchRow, "code" | "profile">>,
+  row: BranchEventRecord,
+  branches: ReadonlyMap<string, Pick<BranchRecord, "code" | "profile">>,
 ): BranchEventDTO {
-  const branch = codes.get(row.branchId);
+  const branch = branches.get(row.branchId);
   return {
     id: row.id,
     branchId: row.branchId,
     branchCode: branch?.code ?? "?",
     branchProfile: branch?.profile ?? "BALANCED",
     type: row.type,
-    createdAt: row.createdAt.getTime(),
+    createdAt: row.createdAt,
     amountCents: row.amountCents,
     capitalDeltaCents: row.capitalDeltaCents,
     capitalAfterCents: row.capitalAfterCents,
     statusAfter: row.statusAfter,
     relatedBetId: row.relatedBetId,
     relatedBranchId: row.relatedBranchId,
-    relatedBranchCode: row.relatedBranchId ? (codes.get(row.relatedBranchId)?.code ?? null) : null,
-    metadata: row.metadata ?? null,
+    relatedBranchCode: row.relatedBranchId
+      ? (branches.get(row.relatedBranchId)?.code ?? null)
+      : null,
+    metadata: row.metadata ? structuredClone(row.metadata) : null,
     description: row.description,
   };
 }
 
 export function toBankDTO(
-  row: BankTransactionRow,
+  row: BankTransactionRecord,
   branchCode: string,
-  bet: Pick<BetRow, "roundNumber" | "eventName"> | null,
+  bet: Pick<BetRecord, "roundNumber" | "eventName"> | null | undefined,
 ): BankTransactionDTO {
   return {
     id: row.id,
@@ -126,18 +164,20 @@ export function toBankDTO(
     roundNumber: bet?.roundNumber ?? null,
     eventName: bet?.eventName ?? null,
     amountCents: row.amountCents,
-    createdAt: row.createdAt.getTime(),
+    createdAt: row.createdAt,
     type: row.type,
     harvestKind: row.harvestKind,
+    status: row.status,
+    withdrawnAt: row.withdrawnAt,
     destination: row.destination,
     notes: row.notes,
   };
 }
 
-export function toCandidateDTO(row: CandidateRow): CandidateDTO {
+export function toCandidateDTO(row: CandidateRecord): CandidateDTO {
   return {
     id: row.id,
-    createdAt: row.createdAt.getTime(),
+    createdAt: row.createdAt,
     eventDate: row.eventDate,
     eventTime: row.eventTime,
     sport: row.sport,
@@ -150,7 +190,7 @@ export function toCandidateDTO(row: CandidateRow): CandidateDTO {
     clvBp: clvBp(row.oddsObservedBp, row.closingOddsBp),
     protocolStatus: row.protocolStatus,
     result: row.result,
-    checklist: row.checklist ?? null,
+    checklist: row.checklist ? { ...row.checklist } : null,
     notes: row.notes,
     convertedBetId: row.convertedBetId,
   };

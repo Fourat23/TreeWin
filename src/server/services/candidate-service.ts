@@ -1,11 +1,9 @@
-import { desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { looksLikeMultiMatch } from "@/domain/bets/tickets";
 import { BET_RESULTS, CANDIDATE_STATUSES, CHECKLIST_ITEMS, TRISTATE_VALUES } from "@/domain/types";
-import type { Db, DbOrTx } from "../db/client";
-import { candidates, type CandidateRow } from "../db/schema";
+import type { CandidateRecord, WorkspaceState } from "../state/schema";
 import { DomainError, notFound } from "./errors";
-import { newId, parseInput } from "./internal";
+import { newId, parseInput, type OpContext } from "./internal";
 
 /**
  * Shadow portfolio: matches analysed but not played, to build statistics without staking.
@@ -39,36 +37,41 @@ export const candidateInputSchema = z.object({
 });
 export type CandidateInput = z.input<typeof candidateInputSchema>;
 
-export function createCandidate(db: Db, input: CandidateInput, now = new Date()): CandidateRow {
-  const data = parseInput(candidateInputSchema, input);
-  const id = newId();
-  db.insert(candidates)
-    .values({
-      id,
-      createdAt: now,
-      updatedAt: now,
-      eventDate: data.eventDate,
-      eventTime: data.eventTime ?? null,
-      sport: data.sport,
-      competition: data.competition,
-      eventName: data.eventName,
-      marketName: data.marketName,
-      selection: data.selection,
-      oddsObservedBp: data.oddsObservedBp,
-      closingOddsBp: data.closingOddsBp ?? null,
-      protocolStatus: data.protocolStatus,
-      result: data.result,
-      checklist: data.checklist ?? null,
-      notes: data.notes ?? null,
-    })
-    .run();
-  return getCandidateOrThrow(db, id);
-}
-
-export function getCandidateOrThrow(db: DbOrTx, id: string): CandidateRow {
-  const row = db.select().from(candidates).where(eq(candidates.id, id)).get();
+export function getCandidateOrThrow(state: WorkspaceState, id: string): CandidateRecord {
+  const row = state.candidates.find((c) => c.id === id);
   if (!row) throw notFound("Candidate", id);
   return row;
+}
+
+export function createCandidate(
+  state: WorkspaceState,
+  input: CandidateInput,
+  ctx: OpContext,
+): CandidateRecord {
+  const data = parseInput(candidateInputSchema, input);
+  const now = ctx.now.getTime();
+  const record: CandidateRecord = {
+    id: newId(),
+    createdAt: now,
+    updatedAt: now,
+    eventDate: data.eventDate,
+    eventTime: data.eventTime ?? null,
+    sport: data.sport,
+    competition: data.competition,
+    eventName: data.eventName,
+    marketName: data.marketName,
+    selection: data.selection,
+    oddsObservedBp: data.oddsObservedBp,
+    closingOddsBp: data.closingOddsBp ?? null,
+    protocolStatus: data.protocolStatus,
+    result: data.result,
+    checklist: data.checklist ?? null,
+    notes: data.notes ?? null,
+    convertedBetId: null,
+    archivedAt: null,
+  };
+  state.candidates.push(record);
+  return record;
 }
 
 export const updateCandidateSchema = candidateInputSchema
@@ -76,44 +79,47 @@ export const updateCandidateSchema = candidateInputSchema
   .extend({ id: z.string().min(1) });
 
 export function updateCandidate(
-  db: Db,
+  state: WorkspaceState,
   input: z.input<typeof updateCandidateSchema>,
-  now = new Date(),
-): CandidateRow {
+  ctx: OpContext,
+): CandidateRecord {
   const { id, ...data } = parseInput(updateCandidateSchema, input);
-  const row = getCandidateOrThrow(db, id);
+  const row = getCandidateOrThrow(state, id);
   if (row.archivedAt) throw new DomainError("INVALID_STATE", "Archived candidates are read-only");
-  const patch = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
-  db.update(candidates)
-    .set({ ...patch, updatedAt: now })
-    .where(eq(candidates.id, id))
-    .run();
-  return getCandidateOrThrow(db, id);
+  for (const [key, value] of Object.entries(data)) {
+    if (value !== undefined) (row as Record<string, unknown>)[key] = value;
+  }
+  row.updatedAt = ctx.now.getTime();
+  return row;
 }
 
-/** Soft delete: the row stays in the database for statistics history. */
-export function archiveCandidate(db: Db, id: string, now = new Date()): void {
-  getCandidateOrThrow(db, id);
-  db.update(candidates).set({ archivedAt: now, updatedAt: now }).where(eq(candidates.id, id)).run();
+/** Soft delete: the candidate stays in the file for statistics history. */
+export function archiveCandidate(state: WorkspaceState, id: string, ctx: OpContext): void {
+  const row = getCandidateOrThrow(state, id);
+  row.archivedAt = ctx.now.getTime();
+  row.updatedAt = row.archivedAt;
+}
+
+/** Permanent deletion of a candidate (typed confirmation is checked by the caller). */
+export function purgeCandidate(state: WorkspaceState, id: string): CandidateRecord {
+  const row = getCandidateOrThrow(state, id);
+  state.candidates = state.candidates.filter((c) => c.id !== id);
+  return row;
 }
 
 export function linkCandidateToBet(
-  db: DbOrTx,
+  state: WorkspaceState,
   candidateId: string,
   betId: string,
-  now = new Date(),
-) {
-  db.update(candidates)
-    .set({ convertedBetId: betId, updatedAt: now })
-    .where(eq(candidates.id, candidateId))
-    .run();
+  ctx: OpContext,
+): void {
+  const row = getCandidateOrThrow(state, candidateId);
+  row.convertedBetId = betId;
+  row.updatedAt = ctx.now.getTime();
 }
 
-export function listCandidates(db: DbOrTx): CandidateRow[] {
-  return db
-    .select()
-    .from(candidates)
-    .where(isNull(candidates.archivedAt))
-    .orderBy(desc(candidates.eventDate), desc(candidates.createdAt))
-    .all();
+export function listCandidates(state: WorkspaceState): CandidateRecord[] {
+  return state.candidates
+    .filter((c) => c.archivedAt === null)
+    .sort((a, b) => b.eventDate.localeCompare(a.eventDate) || b.createdAt - a.createdAt);
 }

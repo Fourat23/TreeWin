@@ -63,7 +63,7 @@ function ActionForm({
   onDone: () => void;
 }) {
   const f = useFormat();
-  const { notifyMutation } = useUi();
+  const { notifyMutation, workspace } = useUi();
   const [amount, setAmount] = useState("");
   const [direction, setDirection] = useState<"+" | "-">("-");
   const [reason, setReason] = useState("");
@@ -87,23 +87,27 @@ function ActionForm({
         }
         result =
           kind === "adjust"
-            ? await adjustBranchCapitalAction({
+            ? await adjustBranchCapitalAction(workspace, {
                 branchId: branch.id,
                 deltaCents: direction === "+" ? cents : -cents,
                 reason,
               })
-            : await transferToBankAction({ branchId: branch.id, amountCents: cents, reason });
+            : await transferToBankAction(workspace, {
+                branchId: branch.id,
+                amountCents: cents,
+                reason,
+              });
       } else if (kind === "profile") {
-        result = await changeBranchProfileAction({
+        result = await changeBranchProfileAction(workspace, {
           branchId: branch.id,
           profile,
           reason,
           applyProfileCap: applyCap,
         });
       } else if (kind === "notes") {
-        result = await updateBranchNotesAction({ branchId: branch.id, notes });
+        result = await updateBranchNotesAction(workspace, { branchId: branch.id, notes });
       } else {
-        result = await setBranchPausedAction({
+        result = await setBranchPausedAction(workspace, {
           branchId: branch.id,
           paused: branch.status !== "PAUSED",
           reason: reason || undefined,

@@ -34,6 +34,8 @@ function branch(
     diedAt: null,
     maturedAt: null,
     lastRoundAt: null,
+    strategyVersion: "1.0",
+    strategyRevision: 0,
     ...overrides,
   };
 }

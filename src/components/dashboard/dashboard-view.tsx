@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, Landmark, Plus, ShieldCheck, Sprout, TriangleAlert } from "lucide-react";
+import { ArrowRight, FlaskConical, Plus, ShieldCheck, Sprout, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { useTransition, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -11,29 +11,30 @@ import { useUi } from "@/components/providers/ui-provider";
 import { AnimatedNumber } from "@/components/ui/animated-number";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/misc";
 import { Tooltip } from "@/components/ui/tooltip";
 import { PROFILE_COLOR_VAR, PROFILE_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/cn";
 import type { DashboardDTO } from "@/server/queries/overview";
-import { loadDemoDataAction } from "@/server/actions/data-actions";
+import { initializeDemoAction } from "@/server/actions/workspace-actions";
 import { ActivityFeed } from "./activity-feed";
 
 export function DashboardView({ data }: { data: DashboardDTO }) {
   const f = useFormat();
   const { openNewTicket, openCreateBranch } = useUi();
 
-  if (data.isEmpty) return <EmptyDashboard />;
-
   const { totals, tickets, branchCounts, bankPeriods } = data;
+  const hasBank = totals.bankCents > 0;
   const securedShare = totals.ecosystemCents > 0 ? totals.bankCents / totals.ecosystemCents : 0;
 
   return (
     <div className="flex flex-col gap-5">
+      {data.isEmpty ? <EmptyDashboard /> : null}
       <div className="grid gap-5 xl:grid-cols-[1.35fr_1fr]">
         <Card className="relative overflow-hidden">
           <div className="px-6 pt-5 pb-6">
             <p className="flex items-center gap-2 text-[12px] font-medium tracking-[0.16em] text-fg-muted uppercase">
-              <ShieldCheck className="size-4" aria-hidden /> Secured BANK
+              <ShieldCheck className="size-4" aria-hidden /> BANK · total secured
             </p>
             <AnimatedNumber
               value={totals.bankCents}
@@ -43,6 +44,20 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
             <p className="mt-2 text-sm text-fg-subtle">
               Money that left the tree for good. It never funds a branch again.
             </p>
+            <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-sm">
+              <div className="flex items-baseline gap-2">
+                <dt className="text-fg-subtle">Withdrawn</dt>
+                <dd className="num font-semibold text-good" data-testid="dashboard-withdrawn">
+                  {f.money(totals.withdrawnCents)}
+                </dd>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <dt className="text-fg-subtle">Awaiting withdrawal</dt>
+                <dd className="num font-semibold" data-testid="dashboard-awaiting">
+                  {f.money(totals.awaitingWithdrawalCents)}
+                </dd>
+              </div>
+            </dl>
             <dl className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
               <Period label="Today" value={bankPeriods.today} />
               <Period label="This week" value={bankPeriods.week} />
@@ -106,9 +121,9 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
           hint="Σ capital of alive branches"
         />
         <Tile
-          label="Alive branches"
-          value={f.num(branchCounts.alive)}
-          sub={`${branchCounts.active} active · ${branchCounts.paused} paused`}
+          label="Branches"
+          value={f.num(branchCounts.total)}
+          sub={`${branchCounts.alive} alive · ${branchCounts.active} active · ${branchCounts.paused} paused`}
         />
         <Tile label="Mature" value={f.num(branchCounts.mature)} sub="at their cap" />
         <Tile
@@ -117,7 +132,7 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
           sub={`of ${branchCounts.total} created`}
         />
         <Tile
-          label="Total bets"
+          label="Tickets"
           value={f.num(tickets.total)}
           sub={`${tickets.won}W · ${tickets.lost}L · ${tickets.void}V · ${tickets.pending} pending`}
         />
@@ -176,16 +191,30 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
             }
           />
           <CardBody>
-            <MoneyAreaChart
-              name="BANK"
-              data={data.bankSeries.map((p) => ({ day: p.day, value: p.cumulativeCents }))}
-            />
+            {hasBank ? (
+              <MoneyAreaChart
+                name="BANK"
+                data={data.bankSeries.map((p) => ({ day: p.day, value: p.cumulativeCents }))}
+              />
+            ) : (
+              <EmptyState
+                title="Nothing secured yet"
+                description="The BANK grows when a branch reaches P1, a threshold or profits above its cap."
+              />
+            )}
           </CardBody>
         </Card>
         <Card>
           <CardHeader title="Profiles" description="Branches per profile — alive vs dead" />
           <CardBody>
-            <ProfileBars profiles={data.profiles} />
+            {branchCounts.total > 0 ? (
+              <ProfileBars profiles={data.profiles} />
+            ) : (
+              <EmptyState
+                title="No branch yet"
+                description="Profiles appear once a root branch exists."
+              />
+            )}
           </CardBody>
         </Card>
       </div>
@@ -194,13 +223,20 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
         <Card>
           <CardHeader title="Branches over time" />
           <CardBody>
-            <CountLinesChart
-              data={data.branchSeries}
-              series={[
-                { key: "alive", name: "Alive", color: "var(--fg)" },
-                { key: "dead", name: "Dead", color: "var(--dead)" },
-              ]}
-            />
+            {branchCounts.total > 0 ? (
+              <CountLinesChart
+                data={data.branchSeries}
+                series={[
+                  { key: "alive", name: "Alive", color: "var(--fg)" },
+                  { key: "dead", name: "Dead", color: "var(--dead)" },
+                ]}
+              />
+            ) : (
+              <EmptyState
+                title="No branch yet"
+                description="Births and deaths are charted here over time."
+              />
+            )}
           </CardBody>
         </Card>
         <Card>
@@ -216,7 +252,14 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
             }
           />
           <CardBody className="max-h-[300px] overflow-y-auto">
-            <ActivityFeed items={data.activity} dense />
+            {data.activity.length > 0 ? (
+              <ActivityFeed items={data.activity} dense />
+            ) : (
+              <EmptyState
+                title="No activity yet"
+                description="Every ticket, harvest and BANK transfer is journaled here."
+              />
+            )}
           </CardBody>
         </Card>
       </div>
@@ -327,41 +370,49 @@ function ProfileBars({ profiles }: { profiles: DashboardDTO["profiles"] }) {
 }
 
 function EmptyDashboard() {
-  const { openCreateBranch, notifyMutation } = useUi();
+  const { openCreateBranch, notifyMutation, workspace } = useUi();
   const [pending, startTransition] = useTransition();
   return (
-    <Card className="mx-auto max-w-2xl">
-      <div className="flex flex-col items-center px-8 py-14 text-center">
-        <Sprout className="size-8 text-harvest" aria-hidden />
-        <h2 className="mt-4 text-xl font-semibold">Plant the first branch</h2>
-        <p className="mt-2 max-w-md text-sm text-fg-muted">
-          A root branch is a bankroll with its own profile. Each ticket is one round on one single
-          match, placed manually on Winamax. Harvests send money to the BANK and create new
-          branches.
-        </p>
-        <div className="mt-6 flex flex-wrap justify-center gap-2">
+    <Card data-testid="empty-dashboard">
+      <div className="flex flex-col items-start gap-4 px-6 py-5 sm:flex-row sm:items-center">
+        <Sprout className="size-7 shrink-0 text-harvest" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <h2 className="text-base font-semibold">
+            {workspace === "REAL"
+              ? "Your REAL workspace is empty — plant the first branch"
+              : "The DEMO workspace is empty"}
+          </h2>
+          <p className="mt-1 text-sm text-fg-muted">
+            {workspace === "REAL"
+              ? "A root branch is a bankroll with its own profile. Each ticket is one round on one single match, placed manually on Winamax."
+              : "Load the demonstration dataset to explore the tree, the BANK and the analytics without touching REAL data."}
+          </p>
+          <p className="mt-2 flex items-center gap-2 text-xs text-fg-subtle">
+            <TriangleAlert className="size-3.5" /> CELLTREE never connects to Winamax and never
+            places a bet.
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
           <Button variant="primary" onClick={openCreateBranch}>
             <Plus /> Create root branch
           </Button>
-          <Button
-            disabled={pending}
-            onClick={() =>
-              startTransition(async () => {
-                const result = await loadDemoDataAction();
-                if (result.ok) {
-                  toast.success("Demo data loaded");
-                  notifyMutation();
-                } else toast.error(result.message);
-              })
-            }
-          >
-            <Landmark /> {pending ? "Loading…" : "Load demo data"}
-          </Button>
+          {workspace === "DEMO" ? (
+            <Button
+              disabled={pending}
+              onClick={() =>
+                startTransition(async () => {
+                  const result = await initializeDemoAction(workspace);
+                  if (result.ok) {
+                    toast.success("DEMO data initialized");
+                    notifyMutation();
+                  } else toast.error(result.message);
+                })
+              }
+            >
+              <FlaskConical /> {pending ? "Loading…" : "Initialize demo data"}
+            </Button>
+          ) : null}
         </div>
-        <p className="mt-6 flex items-center gap-2 text-xs text-fg-subtle">
-          <TriangleAlert className="size-3.5" /> CELLTREE never connects to Winamax and never places
-          a bet.
-        </p>
       </div>
     </Card>
   );

@@ -4,9 +4,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BranchDetailView } from "@/components/branch/branch-detail-view";
 import { PageContainer } from "@/components/ui/misc";
-import { getDb } from "@/server/db";
 import { getBranchDetail } from "@/server/queries/branches";
-import { getSettings } from "@/server/services/settings-service";
+import { loadPageState } from "@/server/state/page";
 
 export async function generateMetadata({
   params,
@@ -19,8 +18,8 @@ export async function generateMetadata({
 
 export default async function BranchPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = await params;
-  const db = getDb();
-  const detail = getBranchDetail(db, decodeURIComponent(code), getSettings(db));
+  const { state } = await loadPageState();
+  const detail = getBranchDetail(state, decodeURIComponent(code));
   if (!detail) notFound();
   return (
     <PageContainer className="max-w-4xl">

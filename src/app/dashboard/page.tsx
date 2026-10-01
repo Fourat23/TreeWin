@@ -2,13 +2,14 @@ import type { Metadata } from "next";
 import { DashboardActions } from "@/components/dashboard/dashboard-actions";
 import { DashboardView } from "@/components/dashboard/dashboard-view";
 import { PageContainer, PageHeader } from "@/components/ui/misc";
-import { getDb } from "@/server/db";
 import { getDashboard } from "@/server/queries/overview";
+import { loadPageState } from "@/server/state/page";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
-export default function DashboardPage() {
-  const data = getDashboard(getDb());
+export default async function DashboardPage() {
+  const { state } = await loadPageState();
+  const data = getDashboard(state);
   return (
     <PageContainer>
       <PageHeader

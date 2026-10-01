@@ -1,6 +1,16 @@
 "use client";
 
-import { Ban, GitFork, Landmark, Pencil, Scale, Undo2 } from "lucide-react";
+import {
+  Ban,
+  FlaskConical,
+  GitFork,
+  Landmark,
+  Pencil,
+  RotateCcw,
+  Scale,
+  Trash2,
+} from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { formatOdds, parseOdds } from "@/domain/money";
@@ -17,17 +27,14 @@ import { Field, Input, Select, Textarea } from "@/components/ui/field";
 import { CHECKLIST_LABEL, DESTINATION_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/cn";
 import type { TicketDetailDTO } from "@/server/queries/tickets";
-import {
-  cancelTicketAction,
-  revertSettlementAction,
-  updateTicketAction,
-} from "@/server/actions/ticket-actions";
+import { cancelTicketAction, updateTicketAction } from "@/server/actions/ticket-actions";
 
 export function TicketDetailView({ detail }: { detail: TicketDetailDTO }) {
   const f = useFormat();
-  const { openSettle, openBranch } = useUi();
-  const { bet, branch } = detail;
-  const [dialog, setDialog] = useState<"edit" | "cancel" | "revert" | null>(null);
+  const { openSettle, openBranch, openCorrection, workspace } = useUi();
+  const router = useRouter();
+  const { bet, branch, corrections } = detail;
+  const [dialog, setDialog] = useState<"edit" | "cancel" | null>(null);
   const pending = bet.result === "PENDING" && !bet.cancelledAt;
   const impliedPct = (10_000 * 10_000) / bet.oddsBp;
 
@@ -105,21 +112,42 @@ export function TicketDetailView({ detail }: { detail: TicketDetailDTO }) {
               <Button onClick={() => setDialog("edit")}>
                 <Pencil /> Edit details
               </Button>
-              {!pending && !bet.cancelledAt ? (
+              {corrections.canReopen ? (
                 <Button
                   variant="ghost"
-                  onClick={() => setDialog("revert")}
-                  disabled={!detail.revert.revertible}
-                  title={detail.revert.reason ?? "Put the ticket back to pending"}
+                  onClick={() => openCorrection({ kind: "REOPEN_TICKET", betId: bet.id })}
+                  title="Put the ticket back to pending (its consequences and later history are removed)"
                 >
-                  <Undo2 /> Revert settlement
+                  <RotateCcw /> Reopen (wrong result)
+                </Button>
+              ) : null}
+              {corrections.canDelete ? (
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    openCorrection(
+                      { kind: "DELETE_TICKET", betId: bet.id },
+                      { onDone: () => router.push("/tickets") },
+                    )
+                  }
+                  title={
+                    pending || bet.cancelledAt
+                      ? "Remove this ticket"
+                      : "Delete this ticket and everything after it on the branch"
+                  }
+                >
+                  <Trash2 /> {pending || bet.cancelledAt ? "Delete ticket" : "Delete from here"}
                 </Button>
               ) : null}
             </div>
-            {!pending && !detail.revert.revertible && !bet.cancelledAt ? (
+            {!pending && !bet.cancelledAt ? (
               <p className="text-xs text-fg-subtle">
-                Revert unavailable: {detail.revert.reason}. Use a manual adjustment on the branch if
-                a correction is needed.
+                Money is never edited in place. To correct this ticket, reopen it (wrong result) or
+                delete it from this point
+                {corrections.laterTickets > 0
+                  ? ` — ${corrections.laterTickets} later ticket(s) on ${branch.code} and every branch born from them would go too`
+                  : ""}
+                . An impact preview and a snapshot come first.
               </p>
             ) : null}
             {bet.cancelledAt ? (
@@ -128,10 +156,20 @@ export function TicketDetailView({ detail }: { detail: TicketDetailDTO }) {
               </p>
             ) : null}
             {bet.overrideReason ? (
-              <p className="rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-fg-muted">
-                Protection overridden: {bet.overrideReason}
+              <p className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-fg-muted">
+                <FlaskConical className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
+                <span>
+                  <strong className="text-warning">
+                    {bet.outsideV1 ? "Outside V1 (DEMO experiment)" : "Limit override"}
+                  </strong>
+                  {" — "}
+                  {bet.overrideReason}
+                </span>
               </p>
             ) : null}
+            <p className="text-[11px] text-fg-subtle">
+              Recorded under strategy {bet.strategyVersion} (revision {bet.strategyRevision}).
+            </p>
             {bet.notes ? (
               <p className="text-sm whitespace-pre-wrap text-fg-muted">{bet.notes}</p>
             ) : null}
@@ -254,15 +292,7 @@ export function TicketDetailView({ detail }: { detail: TicketDetailDTO }) {
         description="Only for a ticket recorded by mistake. It stays in the journal as cancelled; the branch capital is untouched."
         confirmLabel="Cancel ticket"
         onClose={() => setDialog(null)}
-        onConfirm={(reason) => cancelTicketAction({ betId: bet.id, reason })}
-      />
-      <ReasonDialog
-        open={dialog === "revert"}
-        title="Revert settlement"
-        description="Puts the ticket back to pending and restores the branch exactly as before (journaled as MANUAL_ADJUSTMENT). Then settle it again with the right result."
-        confirmLabel="Revert"
-        onClose={() => setDialog(null)}
-        onConfirm={(reason) => revertSettlementAction({ betId: bet.id, reason })}
+        onConfirm={(reason) => cancelTicketAction(workspace, { betId: bet.id, reason })}
       />
     </div>
   );
@@ -301,7 +331,9 @@ function ReasonDialog({
   description: string;
   confirmLabel: string;
   onClose: () => void;
-  onConfirm: (reason: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  onConfirm: (
+    reason: string,
+  ) => Promise<{ ok: true; data: unknown } | { ok: false; message: string }>;
 }) {
   const { notifyMutation } = useUi();
   const [reason, setReason] = useState("");
@@ -366,7 +398,7 @@ function EditTicketDialog({
       description={
         settled
           ? "This ticket is settled: identity edits are journaled. Stake, odds and result can never be edited here."
-          : "Stake and odds cannot be edited — cancel and re-create the ticket if they are wrong."
+          : "Stake and odds cannot be edited — delete the pending ticket and re-create it if they are wrong."
       }
       size="md"
     >
@@ -377,7 +409,7 @@ function EditTicketDialog({
 
 function EditTicketForm({ detail, onDone }: { detail: TicketDetailDTO; onDone: () => void }) {
   const { bet } = detail;
-  const { notifyMutation } = useUi();
+  const { notifyMutation, workspace } = useUi();
   const [form, setForm] = useState({
     sport: bet.sport,
     competition: bet.competition,
@@ -402,7 +434,7 @@ function EditTicketForm({ detail, onDone }: { detail: TicketDetailDTO; onDone: (
       return;
     }
     startTransition(async () => {
-      const result = await updateTicketAction({
+      const result = await updateTicketAction(workspace, {
         betId: bet.id,
         sport: form.sport,
         competition: form.competition,

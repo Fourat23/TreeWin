@@ -7,11 +7,13 @@ import { useEffect, useState, useTransition, type ReactNode } from "react";
 import { PROFILES } from "@/domain/types";
 import { useFormat } from "@/components/providers/format-provider";
 import { Button } from "@/components/ui/button";
-import { ProfileDot, ResultBadge } from "@/components/ui/domain-badges";
+import { OutsideV1Badge, ProfileDot, ResultBadge } from "@/components/ui/domain-badges";
 import { Input, Select } from "@/components/ui/field";
 import { EmptyState } from "@/components/ui/misc";
 import { PROFILE_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/cn";
+import { withWorkspace } from "@/lib/workspace";
+import { useUi } from "@/components/providers/ui-provider";
 import type { BetDTO } from "@/server/queries/dto";
 import type { TicketFilters, TicketListDTO } from "@/server/queries/tickets";
 
@@ -19,6 +21,7 @@ type SortKey = TicketFilters["sort"];
 
 export function TicketsJournal({ data, filters }: { data: TicketListDTO; filters: TicketFilters }) {
   const f = useFormat();
+  const { workspace } = useUi();
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -189,7 +192,7 @@ export function TicketsJournal({ data, filters }: { data: TicketListDTO; filters
           </span>
         </p>
         <Button variant="ghost" size="sm" asChild>
-          <a href="/api/export/csv/tickets" download>
+          <a href={withWorkspace("/api/export/csv/tickets", workspace)} download>
             <Download /> CSV
           </a>
         </Button>
@@ -375,7 +378,10 @@ function TicketRow({ bet }: { bet: BetDTO }) {
       <td className="px-3 py-2.5 text-right num">{f.odds(bet.oddsBp)}</td>
       <td className="px-3 py-2.5 text-right num">{f.money(bet.stakeCents)}</td>
       <td className="px-3 py-2.5">
-        <ResultBadge result={bet.result} cancelled={Boolean(bet.cancelledAt)} />
+        <span className="flex flex-wrap gap-1">
+          <ResultBadge result={bet.result} cancelled={Boolean(bet.cancelledAt)} />
+          {bet.outsideV1 ? <OutsideV1Badge reason={bet.overrideReason} /> : null}
+        </span>
       </td>
       <td className="px-3 py-2.5 text-right num text-fg-muted">
         {bet.actualReturnCents !== null ? f.money(bet.actualReturnCents) : "—"}
@@ -426,7 +432,10 @@ function TicketCard({ bet }: { bet: BetDTO }) {
               · {f.round(bet.roundNumber)} · {f.shortDay(bet.eventDate)}
             </span>
           </span>
-          <ResultBadge result={bet.result} cancelled={Boolean(bet.cancelledAt)} />
+          <span className="flex gap-1">
+            {bet.outsideV1 ? <OutsideV1Badge reason={bet.overrideReason} /> : null}
+            <ResultBadge result={bet.result} cancelled={Boolean(bet.cancelledAt)} />
+          </span>
         </div>
         <p className="mt-1.5 truncate text-sm">{bet.eventName}</p>
         <p className="truncate text-xs text-fg-subtle">{bet.selection}</p>

@@ -389,3 +389,54 @@ describe("rules engine — children & audit", () => {
     });
   });
 });
+
+describe("V1.1 rules", () => {
+  it("defaults P1 to CAPITAL_MULTIPLE 2.80 × S", () => {
+    expect(DEFAULT_SETTINGS.p1.trigger).toBe("CAPITAL_MULTIPLE");
+    expect(DEFAULT_SETTINGS.p1.capitalMultipleBp).toBe(28_000);
+    expect(planP1(10_000, DEFAULT_SETTINGS).thresholdCents).toBe(28_000);
+    // Exactly 280 € fires P1 for S = 100 €.
+    const { plan } = winAllIn(
+      branch({ currentCapitalCents: 21_540, wins: 3, roundCount: 3 }),
+      13_000,
+    );
+    expect(plan.capitalAfterBetCents).toBe(28_002);
+    expect(plan.harvests.map((h) => h.kind)).toEqual(["P1"]);
+  });
+
+  it("keeps the 100 → 285.61 acceptance path: BANK 100, child 100, mother 85.61", () => {
+    let state = branch();
+    let last: SettlementPlan | null = null;
+    for (let i = 0; i < 4; i += 1) ({ plan: last, next: state } = winAllIn(state, 13_000));
+    expect(last?.capitalAfterBetCents).toBe(28_561);
+    expect(last?.totalBankCents).toBe(10_000);
+    expect(last?.totalChildCapitalCents).toBe(10_000);
+    expect(last?.finalCapitalCents).toBe(8_561);
+  });
+
+  it("executes at most one profile threshold per won round", () => {
+    const state = branch({
+      profile: "HARVEST",
+      capCents: 250_000,
+      p1Done: true,
+      currentCapitalCents: 70_000,
+    });
+    const { plan, next } = winAllIn(state, 13_000); // 910 € ≥ 4×S and ≥ 8×S
+    expect(plan.harvests.map((h) => h.kind)).toEqual(["THRESHOLD"]);
+    expect(plan.thresholdLevel).toBe(1);
+    expect(plan.finalCapitalCents).toBe(45_500);
+    // The next threshold (8×S = 800 €) waits for a later won round.
+    expect(nextMilestone(next, DEFAULT_SETTINGS)).toMatchObject({
+      kind: "THRESHOLD",
+      thresholdCents: 80_000,
+    });
+  });
+
+  it("does not add a profile threshold in the round where P1 executes", () => {
+    const state = branch({ profile: "HARVEST", capCents: 250_000, currentCapitalCents: 60_000 });
+    const { plan } = winAllIn(state, 13_000); // 780 €: P1, then still ≥ 4×S
+    expect(plan.harvests.map((h) => h.kind)).toEqual(["P1"]);
+    expect(plan.finalCapitalCents).toBe(58_000);
+    expect(plan.thresholdLevel).toBe(0);
+  });
+});

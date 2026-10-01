@@ -1,13 +1,9 @@
-import { and, asc, desc, eq, gte, isNotNull, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { parseOdds } from "@/domain/money";
 import { BET_RESULTS, PROFILES } from "@/domain/types";
-import type { DbOrTx } from "../db/client";
-import { bankTransactions, bets, branchEvents, branches } from "../db/schema";
-import { checkRevertible, type RevertCheck } from "../services/bet-service";
-import { loadBranchIndex } from "./branches";
+import type { BetRecord, BranchRecord, WorkspaceState } from "../state/schema";
 import type { BankTransactionDTO, BetDTO, BranchEventDTO, BranchSummaryDTO } from "./dto";
-import { toBankDTO, toBetDTO, toBranchSummary, toEventDTO } from "./mappers";
+import { indexState, toBankDTO, toBetDTO, toBranchSummary, toEventDTO } from "./mappers";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const optionalString = z.string().trim().max(120).optional().catch(undefined);
@@ -43,60 +39,84 @@ export type TicketFilters = z.output<typeof ticketFiltersSchema>;
 
 export const TICKETS_PAGE_SIZE = 50;
 
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
-}
+type Row = { bet: BetRecord; branch: BranchRecord };
 
-function buildWhere(filters: TicketFilters): SQL | undefined {
-  const conditions: (SQL | undefined)[] = [];
+function matches(
+  row: Row,
+  filters: TicketFilters,
+  oddsMin: number | null,
+  oddsMax: number | null,
+): boolean {
+  const { bet, branch } = row;
   if (filters.q) {
-    const like = `%${escapeLike(filters.q)}%`;
-    conditions.push(
-      or(
-        sql`${bets.eventName} LIKE ${like} ESCAPE '\\'`,
-        sql`${bets.selection} LIKE ${like} ESCAPE '\\'`,
-        sql`${bets.competition} LIKE ${like} ESCAPE '\\'`,
-        sql`${bets.marketName} LIKE ${like} ESCAPE '\\'`,
-        sql`${bets.notes} LIKE ${like} ESCAPE '\\'`,
-        sql`${branches.code} LIKE ${like} ESCAPE '\\'`,
-      ),
-    );
+    const q = filters.q.toLowerCase();
+    const haystack = [
+      bet.eventName,
+      bet.selection,
+      bet.competition,
+      bet.marketName,
+      bet.notes ?? "",
+      branch.code,
+    ];
+    if (!haystack.some((v) => v.toLowerCase().includes(q))) return false;
   }
-  if (filters.branch) conditions.push(eq(branches.code, filters.branch.toUpperCase()));
-  if (filters.profile) conditions.push(eq(branches.profile, filters.profile));
-  if (filters.sport) conditions.push(eq(bets.sport, filters.sport));
-  if (filters.competition) conditions.push(eq(bets.competition, filters.competition));
-  if (filters.status === "CANCELLED") conditions.push(isNotNull(bets.cancelledAt));
-  else if (filters.status) {
-    conditions.push(eq(bets.result, filters.status), isNull(bets.cancelledAt));
+  if (filters.branch && branch.code !== filters.branch.toUpperCase()) return false;
+  if (filters.profile && branch.profile !== filters.profile) return false;
+  if (filters.sport && bet.sport !== filters.sport) return false;
+  if (filters.competition && bet.competition !== filters.competition) return false;
+  if (filters.status === "CANCELLED") {
+    if (bet.cancelledAt === null) return false;
+  } else if (filters.status && (bet.result !== filters.status || bet.cancelledAt !== null)) {
+    return false;
   }
-  if (filters.from) conditions.push(gte(bets.eventDate, filters.from));
-  if (filters.to) conditions.push(lte(bets.eventDate, filters.to));
-  const oddsMin = filters.oddsMin ? parseOdds(filters.oddsMin) : null;
-  const oddsMax = filters.oddsMax ? parseOdds(filters.oddsMax) : null;
-  if (oddsMin) conditions.push(gte(bets.oddsBp, oddsMin));
-  if (oddsMax) conditions.push(lte(bets.oddsBp, oddsMax));
-  return and(...conditions);
+  if (filters.from && bet.eventDate < filters.from) return false;
+  if (filters.to && bet.eventDate > filters.to) return false;
+  if (oddsMin && bet.oddsBp < oddsMin) return false;
+  if (oddsMax && bet.oddsBp > oddsMax) return false;
+  return true;
 }
 
-function orderBy(filters: TicketFilters): SQL[] {
-  const dir = filters.dir === "asc" ? asc : desc;
-  switch (filters.sort) {
-    case "event":
-      return [dir(bets.eventDate), dir(bets.eventTime), dir(bets.createdAt)];
-    case "odds":
-      return [dir(bets.oddsBp), desc(bets.createdAt)];
-    case "stake":
-      return [dir(bets.stakeCents), desc(bets.createdAt)];
-    case "profit":
-      return [dir(sql`coalesce(${bets.profitLossCents}, 0)`), desc(bets.createdAt)];
-    case "round":
-      return [dir(bets.roundNumber), dir(branches.code)];
-    case "branch":
-      return [dir(branches.code), dir(bets.sequence)];
-    case "created":
-      return [dir(bets.createdAt), dir(bets.sequence)];
-  }
+function compareRows(filters: TicketFilters): (a: Row, b: Row) => number {
+  const sign = filters.dir === "asc" ? 1 : -1;
+  const cmp = (x: number | string, y: number | string) => (x < y ? -1 : x > y ? 1 : 0);
+  return (a, b) => {
+    const keys: [number | string, number | string][] = (() => {
+      switch (filters.sort) {
+        case "event":
+          return [
+            [a.bet.eventDate, b.bet.eventDate],
+            [a.bet.eventTime ?? "", b.bet.eventTime ?? ""],
+            [a.bet.createdAt, b.bet.createdAt],
+          ];
+        case "odds":
+          return [[a.bet.oddsBp, b.bet.oddsBp]];
+        case "stake":
+          return [[a.bet.stakeCents, b.bet.stakeCents]];
+        case "profit":
+          return [[a.bet.profitLossCents ?? 0, b.bet.profitLossCents ?? 0]];
+        case "round":
+          return [
+            [a.bet.roundNumber, b.bet.roundNumber],
+            [a.branch.code, b.branch.code],
+          ];
+        case "branch":
+          return [
+            [a.branch.code, b.branch.code],
+            [a.bet.sequence, b.bet.sequence],
+          ];
+        case "created":
+          return [
+            [a.bet.createdAt, b.bet.createdAt],
+            [a.bet.sequence, b.bet.sequence],
+          ];
+      }
+    })();
+    for (const [x, y] of keys) {
+      const c = cmp(x, y);
+      if (c !== 0) return sign * c;
+    }
+    return b.bet.createdAt - a.bet.createdAt;
+  };
 }
 
 export interface TicketListDTO {
@@ -115,67 +135,56 @@ export interface TicketListDTO {
   facets: { sports: string[]; competitions: string[]; branches: string[] };
 }
 
-export function listTickets(db: DbOrTx, filters: TicketFilters): TicketListDTO {
-  const where = buildWhere(filters);
-  const totals = db
-    .select({
-      n: sql<number>`count(*)`,
-      stake: sql<number>`coalesce(sum(${bets.stakeCents}), 0)`,
-      profit: sql<number>`coalesce(sum(${bets.profitLossCents}), 0)`,
-      won: sql<number>`sum(case when ${bets.result} = 'WON' and ${bets.cancelledAt} is null then 1 else 0 end)`,
-      lost: sql<number>`sum(case when ${bets.result} = 'LOST' and ${bets.cancelledAt} is null then 1 else 0 end)`,
-      voided: sql<number>`sum(case when ${bets.result} = 'VOID' and ${bets.cancelledAt} is null then 1 else 0 end)`,
-      pending: sql<number>`sum(case when ${bets.result} = 'PENDING' and ${bets.cancelledAt} is null then 1 else 0 end)`,
-    })
-    .from(bets)
-    .innerJoin(branches, eq(bets.branchId, branches.id))
-    .where(where)
-    .get();
-  const total = Number(totals?.n ?? 0);
+export function listTickets(state: WorkspaceState, filters: TicketFilters): TicketListDTO {
+  const { branchById } = indexState(state);
+  const oddsMin = filters.oddsMin ? parseOdds(filters.oddsMin) : null;
+  const oddsMax = filters.oddsMax ? parseOdds(filters.oddsMax) : null;
+  const all: Row[] = [];
+  for (const bet of state.bets) {
+    const branch = branchById.get(bet.branchId);
+    if (branch) all.push({ bet, branch });
+  }
+  const filtered = all
+    .filter((r) => matches(r, filters, oddsMin, oddsMax))
+    .sort(compareRows(filters));
+  const total = filtered.length;
   const pageCount = Math.max(1, Math.ceil(total / TICKETS_PAGE_SIZE));
   const page = Math.min(filters.page, pageCount);
-  const rows = db
-    .select({ bet: bets, code: branches.code, profile: branches.profile })
-    .from(bets)
-    .innerJoin(branches, eq(bets.branchId, branches.id))
-    .where(where)
-    .orderBy(...orderBy(filters))
-    .limit(TICKETS_PAGE_SIZE)
-    .offset((page - 1) * TICKETS_PAGE_SIZE)
-    .all();
-
-  const distinct = (column: typeof bets.sport | typeof bets.competition) =>
-    db
-      .selectDistinct({ value: column })
-      .from(bets)
-      .orderBy(asc(column))
-      .all()
-      .map((r) => r.value);
+  const live = filtered.filter((r) => r.bet.cancelledAt === null);
+  const countOf = (result: string) => live.filter((r) => r.bet.result === result).length;
+  const distinct = (values: string[]) => [...new Set(values)].sort((a, b) => a.localeCompare(b));
 
   return {
-    rows: rows.map((r) => toBetDTO(r.bet, { code: r.code, profile: r.profile })),
+    rows: filtered
+      .slice((page - 1) * TICKETS_PAGE_SIZE, page * TICKETS_PAGE_SIZE)
+      .map((r) => toBetDTO(r.bet, r.branch)),
     total,
     page,
     pageCount,
     summary: {
-      stakeCents: Number(totals?.stake ?? 0),
-      profitCents: Number(totals?.profit ?? 0),
-      won: Number(totals?.won ?? 0),
-      lost: Number(totals?.lost ?? 0),
-      void: Number(totals?.voided ?? 0),
-      pending: Number(totals?.pending ?? 0),
+      stakeCents: filtered.reduce((s, r) => s + r.bet.stakeCents, 0),
+      profitCents: filtered.reduce((s, r) => s + (r.bet.profitLossCents ?? 0), 0),
+      won: countOf("WON"),
+      lost: countOf("LOST"),
+      void: countOf("VOID"),
+      pending: countOf("PENDING"),
     },
     facets: {
-      sports: distinct(bets.sport),
-      competitions: distinct(bets.competition),
-      branches: db
-        .select({ code: branches.code })
-        .from(branches)
-        .orderBy(asc(branches.code))
-        .all()
-        .map((r) => r.code),
+      sports: distinct(state.bets.map((b) => b.sport)),
+      competitions: distinct(state.bets.map((b) => b.competition)),
+      branches: distinct(state.branches.map((b) => b.code)),
     },
   };
+}
+
+/** Which corrections the UI may offer for a ticket. */
+export interface TicketCorrections {
+  canEdit: boolean;
+  canCancel: boolean;
+  canReopen: boolean;
+  /** Settled tickets are deleted "from this point" (with everything after them on the branch). */
+  canDelete: boolean;
+  laterTickets: number;
 }
 
 export interface TicketDetailDTO {
@@ -184,39 +193,38 @@ export interface TicketDetailDTO {
   events: BranchEventDTO[];
   children: BranchSummaryDTO[];
   bankTransactions: BankTransactionDTO[];
-  revert: RevertCheck;
+  corrections: TicketCorrections;
 }
 
-export function getTicketDetail(db: DbOrTx, betId: string): TicketDetailDTO | null {
-  const bet = db.select().from(bets).where(eq(bets.id, betId)).get();
+export function getTicketDetail(state: WorkspaceState, betId: string): TicketDetailDTO | null {
+  const { branchById, betById, pendingBranchIds } = indexState(state);
+  const bet = betById.get(betId);
   if (!bet) return null;
-  const branch = db.select().from(branches).where(eq(branches.id, bet.branchId)).get();
+  const branch = branchById.get(bet.branchId);
   if (!branch) return null;
-  const index = loadBranchIndex(db);
-  const pending = bet.result === "PENDING" && !bet.cancelledAt;
+  const open = bet.result === "PENDING" && bet.cancelledAt === null;
+  const settled = bet.result !== "PENDING";
   return {
     bet: toBetDTO(bet, branch),
-    branch: toBranchSummary(branch, pending),
-    events: db
-      .select()
-      .from(branchEvents)
-      .where(eq(branchEvents.relatedBetId, bet.id))
-      .orderBy(asc(branchEvents.id))
-      .all()
-      .map((e) => toEventDTO(e, index)),
-    children: db
-      .select()
-      .from(branches)
-      .where(eq(branches.birthBetId, bet.id))
-      .orderBy(asc(branches.code))
-      .all()
-      .map((c) => toBranchSummary(c)),
-    bankTransactions: db
-      .select()
-      .from(bankTransactions)
-      .where(eq(bankTransactions.relatedBetId, bet.id))
-      .all()
+    branch: toBranchSummary(branch, pendingBranchIds.has(branch.id)),
+    events: state.branchEvents
+      .filter((e) => e.relatedBetId === bet.id)
+      .sort((a, b) => a.id - b.id)
+      .map((e) => toEventDTO(e, branchById)),
+    children: state.branches
+      .filter((b) => b.birthBetId === bet.id)
+      .sort((a, b) => a.code.localeCompare(b.code))
+      .map((c) => toBranchSummary(c, pendingBranchIds.has(c.id))),
+    bankTransactions: state.bankTransactions
+      .filter((t) => t.relatedBetId === bet.id)
       .map((t) => toBankDTO(t, branch.code, bet)),
-    revert: checkRevertible(db, bet.id),
+    corrections: {
+      canEdit: true,
+      canCancel: open,
+      canReopen: settled,
+      canDelete: true,
+      laterTickets: state.bets.filter((b) => b.branchId === branch.id && b.sequence > bet.sequence)
+        .length,
+    },
   };
 }

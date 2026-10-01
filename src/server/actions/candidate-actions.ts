@@ -1,38 +1,23 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
-import { getDb } from "../db";
 import {
-  archiveCandidate,
   createCandidate,
   updateCandidate,
   type CandidateInput,
 } from "../services/candidate-service";
-import { runAction, type ActionResult } from "./result";
-
-function refresh() {
-  revalidatePath("/candidates");
-  revalidatePath("/analytics");
-}
+import type { ActionResult } from "./result";
+import { mutateAction } from "./workspace-op";
 
 export async function createCandidateAction(
+  workspace: string,
   input: CandidateInput,
 ): Promise<ActionResult<{ id: string }>> {
-  const result = runAction(() => ({ id: createCandidate(getDb(), input).id }));
-  if (result.ok) refresh();
-  return result;
+  return mutateAction(workspace, (state, ctx) => ({ id: createCandidate(state, input, ctx).id }));
 }
 
 export async function updateCandidateAction(
+  workspace: string,
   input: Partial<CandidateInput> & { id: string },
 ): Promise<ActionResult> {
-  const result = runAction(() => void updateCandidate(getDb(), input));
-  if (result.ok) refresh();
-  return result;
-}
-
-export async function archiveCandidateAction(id: string): Promise<ActionResult> {
-  const result = runAction(() => archiveCandidate(getDb(), id));
-  if (result.ok) refresh();
-  return result;
+  return mutateAction(workspace, (state, ctx) => void updateCandidate(state, input, ctx));
 }

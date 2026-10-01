@@ -1,14 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import type { z } from "zod";
 import { emptyProfileCounts, type ProfileCounts } from "@/domain/branches/profile-picker";
 import { formatMoney, type Cents } from "@/domain/money";
 import type { BranchState } from "@/domain/strategy/engine";
 import type { StrategySettings } from "@/domain/strategy/settings";
-import { PROFILES } from "@/domain/types";
-import type { DbOrTx } from "../db/client";
-import { bets, branchEvents, branches, type BranchRow, type NewBranchEventRow } from "../db/schema";
+import type { Workspace } from "@/domain/types";
+import type { BetRecord, BranchEventRecord, BranchRecord, WorkspaceState } from "../state/schema";
 import { DomainError, notFound } from "./errors";
+
+/** What every state operation receives besides the draft state. */
+export interface OpContext {
+  workspace: Workspace;
+  now: Date;
+}
 
 export const newId = (): string => randomUUID();
 
@@ -28,34 +32,45 @@ export function moneyFormatter(
     formatMoney(cents, { locale: settings.locale, currency: settings.currency, signed });
 }
 
-export function insertEvent(tx: DbOrTx, event: NewBranchEventRow): number {
-  const row = tx.insert(branchEvents).values(event).returning({ id: branchEvents.id }).get();
-  return row.id;
+/** Append an event to the log with the next global id. */
+export function pushEvent(state: WorkspaceState, event: Omit<BranchEventRecord, "id">): number {
+  const id = state.metadata.nextEventId;
+  state.metadata.nextEventId += 1;
+  state.branchEvents.push({ ...event, id });
+  return id;
 }
 
-export function getBranchOrThrow(tx: DbOrTx, branchId: string): BranchRow {
-  const row = tx.select().from(branches).where(eq(branches.id, branchId)).get();
+export function getBranchOrThrow(state: WorkspaceState, branchId: string): BranchRecord {
+  const row = state.branches.find((b) => b.id === branchId);
   if (!row) throw notFound("Branch", branchId);
   return row;
 }
 
-export function findBranchByIdOrCode(tx: DbOrTx, idOrCode: string): BranchRow | undefined {
+export function findBranchByIdOrCode(
+  state: WorkspaceState,
+  idOrCode: string,
+): BranchRecord | undefined {
   return (
-    tx.select().from(branches).where(eq(branches.id, idOrCode)).get() ??
-    tx.select().from(branches).where(eq(branches.code, idOrCode)).get()
+    state.branches.find((b) => b.id === idOrCode) ??
+    state.branches.find((b) => b.code === idOrCode.toUpperCase())
   );
 }
 
-export function hasPendingTicket(tx: DbOrTx, branchId: string): boolean {
-  const row = tx
-    .select({ id: bets.id })
-    .from(bets)
-    .where(and(eq(bets.branchId, branchId), eq(bets.result, "PENDING"), isNull(bets.cancelledAt)))
-    .get();
-  return Boolean(row);
+export function getBetOrThrow(state: WorkspaceState, betId: string): BetRecord {
+  const row = state.bets.find((b) => b.id === betId);
+  if (!row) throw notFound("Ticket", betId);
+  return row;
 }
 
-export function toBranchState(row: BranchRow): BranchState {
+export function isOpenTicket(bet: BetRecord): boolean {
+  return bet.result === "PENDING" && bet.cancelledAt === null;
+}
+
+export function pendingTicketOf(state: WorkspaceState, branchId: string): BetRecord | undefined {
+  return state.bets.find((b) => b.branchId === branchId && isOpenTicket(b));
+}
+
+export function toBranchState(row: BranchRecord): BranchState {
   return {
     code: row.code,
     profile: row.profile,
@@ -77,18 +92,9 @@ export function toBranchState(row: BranchRow): BranchState {
  * Profile counts used by QUOTA assignment: only automatically created branches
  * (roots are chosen by hand and would otherwise skew the distribution).
  */
-export function automaticProfileCounts(tx: DbOrTx): ProfileCounts {
-  const rows = tx
-    .select({ profile: branches.profile, count: sql<number>`count(*)` })
-    .from(branches)
-    .where(ne(branches.birthReason, "ROOT"))
-    .groupBy(branches.profile)
-    .all();
+export function automaticProfileCounts(state: WorkspaceState): ProfileCounts {
   const counts = emptyProfileCounts();
-  for (const row of rows) {
-    if ((PROFILES as readonly string[]).includes(row.profile))
-      counts[row.profile] = Number(row.count);
-  }
+  for (const b of state.branches) if (b.birthReason !== "ROOT") counts[b.profile] += 1;
   return counts;
 }
 
@@ -98,4 +104,15 @@ export function localDay(date: Date): string {
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
+}
+
+/** Strategy stamp recorded on every new branch and ticket. */
+export function strategyStamp(state: WorkspaceState): {
+  strategyVersion: string;
+  strategyRevision: number;
+} {
+  return {
+    strategyVersion: state.settings.strategyVersion,
+    strategyRevision: state.metadata.strategyRevision,
+  };
 }

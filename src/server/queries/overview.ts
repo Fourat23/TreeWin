@@ -1,12 +1,11 @@
-import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import { clvBp } from "@/domain/bets/tickets";
 import type { Cents } from "@/domain/money";
 import { PROFILES, type BranchEventType, type Profile } from "@/domain/types";
-import type { DbOrTx } from "../db/client";
-import { bankTransactions, bets, branchEvents, branches } from "../db/schema";
+import { bankStatusTotals } from "../services/bank-service";
 import { localDay } from "../services/internal";
-import { loadBranchIndex } from "./branches";
+import type { WorkspaceState } from "../state/schema";
 import type { ActivityItemDTO } from "./dto";
+import { indexState } from "./mappers";
 
 const DAY_MS = 86_400_000;
 
@@ -64,6 +63,9 @@ export interface DashboardDTO {
   isEmpty: boolean;
   totals: {
     bankCents: Cents;
+    /** BANK money already withdrawn from Winamax / still awaiting withdrawal. */
+    withdrawnCents: Cents;
+    awaitingWithdrawalCents: Cents;
     activeCapitalCents: Cents;
     ecosystemCents: Cents;
     injectedCents: Cents;
@@ -108,57 +110,30 @@ export interface DashboardDTO {
   activity: ActivityItemDTO[];
 }
 
-export function getDashboard(db: DbOrTx, now = new Date()): DashboardDTO {
-  const branchRows = db.select().from(branches).all();
-  const bankRows = db
-    .select({
-      amountCents: bankTransactions.amountCents,
-      createdAt: bankTransactions.createdAt,
-      profile: bankTransactions.profile,
-    })
-    .from(bankTransactions)
-    .all()
-    .map((r) => ({ ...r, createdAt: r.createdAt.getTime() }));
+export function getDashboard(state: WorkspaceState, now = new Date()): DashboardDTO {
+  const branchRows = state.branches;
+  const bankRows = state.bankTransactions;
 
   const alive = branchRows.filter((b) => b.status !== "DEAD");
-  const bankCents = bankRows.reduce((s, r) => s + r.amountCents, 0);
+  const bank = bankStatusTotals(state);
   const activeCapitalCents = alive.reduce((s, b) => s + b.currentCapitalCents, 0);
   const injectedCents = branchRows
     .filter((b) => b.birthReason === "ROOT")
     .reduce((s, b) => s + b.birthCapitalCents, 0);
   const childCapitalCents = branchRows.reduce((s, b) => s + b.totalChildCapitalGeneratedCents, 0);
 
-  const ticketAgg = db
-    .select({
-      result: bets.result,
-      n: sql<number>`count(*)`,
-      odds: sql<number>`coalesce(sum(${bets.oddsBp}), 0)`,
-      stake: sql<number>`coalesce(sum(${bets.stakeCents}), 0)`,
-      profit: sql<number>`coalesce(sum(${bets.profitLossCents}), 0)`,
-    })
-    .from(bets)
-    .where(isNull(bets.cancelledAt))
-    .groupBy(bets.result)
-    .all();
-  const count = (r: string) => Number(ticketAgg.find((t) => t.result === r)?.n ?? 0);
-  const total = ticketAgg.reduce((s, t) => s + Number(t.n), 0);
-  const oddsSum = ticketAgg.reduce((s, t) => s + Number(t.odds), 0);
-  const stakeSum = ticketAgg.reduce((s, t) => s + Number(t.stake), 0);
+  const liveTickets = state.bets.filter((b) => b.cancelledAt === null);
+  const count = (result: string) => liveTickets.filter((b) => b.result === result).length;
+  const total = liveTickets.length;
   const won = count("WON");
   const lost = count("LOST");
-
-  const clvRows = db
-    .select({ odds: bets.oddsBp, closing: bets.closingOddsBp })
-    .from(bets)
-    .where(and(isNull(bets.cancelledAt), sql`${bets.closingOddsBp} IS NOT NULL`))
-    .all();
-  const clvValues = clvRows
-    .map((r) => clvBp(r.odds, r.closing))
+  const clvValues = liveTickets
+    .map((b) => clvBp(b.oddsBp, b.closingOddsBp))
     .filter((v): v is number => v !== null);
 
   // Time series.
   const firstMs = Math.min(
-    ...branchRows.map((b) => b.createdAt.getTime()),
+    ...branchRows.map((b) => b.createdAt),
     ...bankRows.map((r) => r.createdAt),
     now.getTime(),
   );
@@ -174,10 +149,10 @@ export function getDashboard(db: DbOrTx, now = new Date()): DashboardDTO {
     cumulative += daily;
     return { day, cumulativeCents: cumulative, dailyCents: daily };
   });
-  const births = branchRows.map((b) => localDay(b.createdAt)).sort();
+  const births = branchRows.map((b) => localDay(new Date(b.createdAt))).sort();
   const deaths = branchRows
-    .filter((b) => b.diedAt)
-    .map((b) => localDay(b.diedAt as Date))
+    .filter((b) => b.diedAt !== null)
+    .map((b) => localDay(new Date(b.diedAt as number)))
     .sort();
   let bi = 0;
   let di = 0;
@@ -207,14 +182,16 @@ export function getDashboard(db: DbOrTx, now = new Date()): DashboardDTO {
   return {
     isEmpty: branchRows.length === 0,
     totals: {
-      bankCents,
+      bankCents: bank.securedCents,
+      withdrawnCents: bank.withdrawnCents,
+      awaitingWithdrawalCents: bank.awaitingWithdrawalCents,
       activeCapitalCents,
-      ecosystemCents: bankCents + activeCapitalCents,
+      ecosystemCents: bank.securedCents + activeCapitalCents,
       injectedCents,
       lostCents: branchRows.reduce((s, b) => s + b.totalLostCents, 0),
-      harvestedCents: bankCents + childCapitalCents,
+      harvestedCents: bank.securedCents + childCapitalCents,
       childCapitalCents,
-      netSecuredCents: bankCents - injectedCents,
+      netSecuredCents: bank.securedCents - injectedCents,
     },
     bankPeriods: periodTotals(bankRows, now),
     branchCounts: {
@@ -232,9 +209,11 @@ export function getDashboard(db: DbOrTx, now = new Date()): DashboardDTO {
       lost,
       void: count("VOID"),
       winRate: won + lost > 0 ? won / (won + lost) : null,
-      avgOddsBp: total > 0 ? Math.round(oddsSum / total) : null,
-      avgStakeCents: total > 0 ? Math.round(stakeSum / total) : null,
-      profitCents: ticketAgg.reduce((s, t) => s + Number(t.profit), 0),
+      avgOddsBp:
+        total > 0 ? Math.round(liveTickets.reduce((s, b) => s + b.oddsBp, 0) / total) : null,
+      avgStakeCents:
+        total > 0 ? Math.round(liveTickets.reduce((s, b) => s + b.stakeCents, 0) / total) : null,
+      profitCents: liveTickets.reduce((s, b) => s + (b.profitLossCents ?? 0), 0),
       avgClvBp:
         clvValues.length > 0
           ? Math.round(clvValues.reduce((s, v) => s + v, 0) / clvValues.length)
@@ -244,11 +223,11 @@ export function getDashboard(db: DbOrTx, now = new Date()): DashboardDTO {
     bankSeries,
     branchSeries,
     profiles,
-    activity: getActivityFeed(db, { limit: 14 }).items,
+    activity: getActivityFeed(state, { limit: 14 }).items,
   };
 }
 
-/** Event types shown in human activity feeds (SPLIT/BET_CREATED are summarised elsewhere). */
+/** Event types shown in human activity feeds (SPLIT is summarised elsewhere). */
 export const FEED_EVENT_TYPES: BranchEventType[] = [
   "BIRTH",
   "BET_CREATED",
@@ -267,40 +246,39 @@ export const FEED_EVENT_TYPES: BranchEventType[] = [
 ];
 
 export function getActivityFeed(
-  db: DbOrTx,
+  state: WorkspaceState,
   options: { limit?: number; before?: number; branchId?: string; types?: BranchEventType[] } = {},
 ): { items: ActivityItemDTO[]; nextCursor: number | null } {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
-  const index = loadBranchIndex(db);
-  const rows = db
-    .select()
-    .from(branchEvents)
-    .where(
-      and(
-        inArray(branchEvents.type, options.types ?? FEED_EVENT_TYPES),
-        options.before ? lt(branchEvents.id, options.before) : undefined,
-        options.branchId ? eq(branchEvents.branchId, options.branchId) : undefined,
-      ),
+  const { branchById } = indexState(state);
+  const types = new Set(options.types ?? FEED_EVENT_TYPES);
+  const rows = state.branchEvents
+    .filter(
+      (e) =>
+        types.has(e.type) &&
+        (options.before === undefined || e.id < options.before) &&
+        (!options.branchId || e.branchId === options.branchId),
     )
-    .orderBy(desc(branchEvents.id))
-    .limit(limit + 1)
-    .all();
+    .sort((a, b) => b.id - a.id)
+    .slice(0, limit + 1);
   const page = rows.slice(0, limit);
   return {
     items: page.map((r) => {
-      const branch = index.get(r.branchId);
+      const branch = branchById.get(r.branchId);
       return {
         id: r.id,
         type: r.type,
         branchId: r.branchId,
         branchCode: branch?.code ?? "?",
         profile: branch?.profile ?? "BALANCED",
-        createdAt: r.createdAt.getTime(),
+        createdAt: r.createdAt,
         amountCents: r.amountCents,
         capitalDeltaCents: r.capitalDeltaCents,
         description: r.description,
         relatedBranchId: r.relatedBranchId,
-        relatedBranchCode: r.relatedBranchId ? (index.get(r.relatedBranchId)?.code ?? null) : null,
+        relatedBranchCode: r.relatedBranchId
+          ? (branchById.get(r.relatedBranchId)?.code ?? null)
+          : null,
       };
     }),
     nextCursor: rows.length > limit ? (page.at(-1)?.id ?? null) : null,

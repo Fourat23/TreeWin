@@ -5,6 +5,7 @@ import { useEffect, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { PROFILES, type Profile, type SettleResult } from "@/domain/types";
 import { useFormat } from "@/components/providers/format-provider";
+import { useUi } from "@/components/providers/ui-provider";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/field";
@@ -61,6 +62,7 @@ export function SettleDialog({
 
 function SettleFlow({ betId, onSettled }: { betId: string; onSettled: () => void }) {
   const f = useFormat();
+  const { workspace } = useUi();
   const [result, setResult] = useState<SettleResult | null>(null);
   const [childProfiles, setChildProfiles] = useState<Profile[]>([]);
   const [preview, setPreview] = useState<SettlementPreviewData | null>(null);
@@ -70,7 +72,7 @@ function SettleFlow({ betId, onSettled }: { betId: string; onSettled: () => void
   useEffect(() => {
     if (!result) return;
     let active = true;
-    void previewSettlementAction({ betId, result, childProfiles }).then((r) => {
+    void previewSettlementAction(workspace, { betId, result, childProfiles }).then((r) => {
       if (!active) return;
       if (r.ok) {
         setPreview(r.data);
@@ -83,12 +85,12 @@ function SettleFlow({ betId, onSettled }: { betId: string; onSettled: () => void
     return () => {
       active = false;
     };
-  }, [betId, result, childProfiles]);
+  }, [betId, result, childProfiles, workspace]);
 
   function confirm() {
     if (!result) return;
     startTransition(async () => {
-      const r = await settleTicketAction({ betId, result, childProfiles });
+      const r = await settleTicketAction(workspace, { betId, result, childProfiles });
       if (!r.ok) {
         setError(r.message);
         return;

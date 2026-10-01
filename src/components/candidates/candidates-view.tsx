@@ -1,6 +1,6 @@
 "use client";
 
-import { Archive, Pencil, Plus, Ticket } from "lucide-react";
+import { Archive, Pencil, Plus, Ticket, Trash2 } from "lucide-react";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { formatOdds, parseOdds } from "@/domain/money";
@@ -26,11 +26,8 @@ import { EmptyState, Segmented } from "@/components/ui/misc";
 import { todayIso } from "@/lib/dates";
 import { cn } from "@/lib/cn";
 import type { CandidateDTO } from "@/server/queries/dto";
-import {
-  archiveCandidateAction,
-  createCandidateAction,
-  updateCandidateAction,
-} from "@/server/actions/candidate-actions";
+import { deleteCandidateAction } from "@/server/actions/correction-actions";
+import { createCandidateAction, updateCandidateAction } from "@/server/actions/candidate-actions";
 
 const STATUS_TONE: Record<CandidateStatus, BadgeTone> = {
   ELIGIBLE: "good",
@@ -181,7 +178,7 @@ export function CandidatesView({
                       >
                         <Pencil />
                       </Button>
-                      <ArchiveButton id={c.id} />
+                      <ArchiveButton id={c.id} label={`${c.eventName} · ${c.selection}`} />
                     </div>
                   </td>
                 </tr>
@@ -209,28 +206,79 @@ export function CandidatesView({
   );
 }
 
-function ArchiveButton({ id }: { id: string }) {
-  const { notifyMutation } = useUi();
+function ArchiveButton({ id, label }: { id: string; label: string }) {
+  const { notifyMutation, workspace } = useUi();
   const [pending, startTransition] = useTransition();
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+  const remove = (mode: "ARCHIVE" | "PURGE") =>
+    startTransition(async () => {
+      const result = await deleteCandidateAction(workspace, {
+        id,
+        mode,
+        confirmation: mode === "PURGE" ? typed : undefined,
+      });
+      if (result.ok) {
+        toast.success(result.data);
+        setPurgeOpen(false);
+        notifyMutation();
+      } else toast.error(result.message);
+    });
   return (
-    <Button
-      variant="ghost"
-      size="icon-sm"
-      aria-label="Archive candidate"
-      title="Archive (kept in the database)"
-      disabled={pending}
-      onClick={() =>
-        startTransition(async () => {
-          const result = await archiveCandidateAction(id);
-          if (result.ok) {
-            toast.success("Candidate archived");
-            notifyMutation();
-          } else toast.error(result.message);
-        })
-      }
-    >
-      <Archive />
-    </Button>
+    <>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label="Archive candidate"
+        title="Archive (kept in the file, hidden from lists)"
+        disabled={pending}
+        onClick={() => remove("ARCHIVE")}
+      >
+        <Archive />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label="Delete candidate permanently"
+        title="Delete permanently"
+        disabled={pending}
+        onClick={() => setPurgeOpen(true)}
+      >
+        <Trash2 />
+      </Button>
+      <Dialog
+        open={purgeOpen}
+        onOpenChange={setPurgeOpen}
+        title="Delete candidate permanently?"
+        description={label}
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setPurgeOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              disabled={pending || typed !== "DELETE"}
+              onClick={() => remove("PURGE")}
+            >
+              Delete permanently
+            </Button>
+          </>
+        }
+      >
+        <label className="flex flex-col gap-1.5 text-xs text-fg-muted">
+          A snapshot is taken first. Type <strong className="font-mono text-fg">DELETE</strong> to
+          confirm.
+          <Input
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            className="font-mono"
+            autoComplete="off"
+          />
+        </label>
+      </Dialog>
+    </>
   );
 }
 
@@ -241,7 +289,7 @@ function CandidateForm({
   candidate: CandidateDTO | null;
   onDone: () => void;
 }) {
-  const { notifyMutation } = useUi();
+  const { notifyMutation, workspace } = useUi();
   const [form, setForm] = useState({
     eventDate: candidate?.eventDate ?? todayIso(),
     eventTime: candidate?.eventTime ?? "",
@@ -287,8 +335,8 @@ function CandidateForm({
     };
     startTransition(async () => {
       const result = candidate
-        ? await updateCandidateAction({ id: candidate.id, ...payload })
-        : await createCandidateAction(payload);
+        ? await updateCandidateAction(workspace, { id: candidate.id, ...payload })
+        : await createCandidateAction(workspace, payload);
       if (!result.ok) {
         setError(result.message);
         return;

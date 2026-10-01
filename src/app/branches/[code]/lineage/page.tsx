@@ -4,8 +4,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { LineageView } from "@/components/branch/lineage-view";
 import { PageContainer, PageHeader } from "@/components/ui/misc";
-import { getDb } from "@/server/db";
 import { getLineage } from "@/server/queries/branches";
+import { loadPageState } from "@/server/state/page";
 
 export async function generateMetadata({
   params,
@@ -18,7 +18,8 @@ export async function generateMetadata({
 
 export default async function LineagePage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = await params;
-  const lineage = getLineage(getDb(), decodeURIComponent(code));
+  const { state } = await loadPageState();
+  const lineage = getLineage(state, decodeURIComponent(code));
   if (!lineage) notFound();
   return (
     <PageContainer className="max-w-5xl">

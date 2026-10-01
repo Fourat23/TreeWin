@@ -4,77 +4,72 @@
 bankroll organisée en arbre de branches (« cellules »).
 
 Chaque branche est une bankroll indépendante : elle naît avec un capital et un profil, joue des rounds
-successifs (1 round = 1 ticket = **un seul match** sur Winamax), récolte vers une **BANK** sécurisée,
-crée des branches filles, peut devenir **mature** à son plafond et finit par **mourir** — sans jamais
-disparaître de l'historique.
+successifs (1 round = 1 ticket = **un seul match** sur Winamax, avec **tout son capital**), récolte vers une
+**BANK** sécurisée, crée des branches filles, peut devenir **mature** à son plafond et finit par **mourir** —
+sans jamais disparaître de l'historique.
 
 > **Note de sécurité — rien n'est automatisé.** CELLTREE ne se connecte pas à Winamax, ne place aucun
-> pari, ne clique rien, n'effectue aucun dépôt et ne contourne aucune limite. Tous les tickets sont
-> placés **manuellement** sur Winamax puis saisis dans l'application. L'application calcule, recommande
-> des montants selon les règles enregistrées, suit, simule et visualise. Elle fonctionne intégralement en
-> local (aucun SaaS, aucun compte, aucun service cloud, aucune donnée envoyée).
+> pari, ne clique rien, n'effectue aucun dépôt, n'augmente aucune limite et n'en contourne aucune. Tous les
+> tickets sont placés **manuellement** sur Winamax puis saisis dans l'application. L'application calcule,
+> applique les règles enregistrées, suit, simule et visualise. Elle fonctionne intégralement en local (aucun
+> SaaS, aucun compte, aucun service cloud, aucune donnée envoyée).
 
 ---
 
 ## Sommaire
 
-1. [Fonctionnalités](#fonctionnalités)
-2. [Stack](#stack)
-3. [Installation et lancement](#installation-et-lancement)
-4. [Scripts](#scripts)
-5. [Base de données](#base-de-données)
-6. [Tests](#tests)
-7. [Architecture](#architecture)
-8. [Règles métier](#règles-métier)
-9. [Modèle de données](#modèle-de-données)
-10. [Sauvegarde et restauration](#sauvegarde-et-restauration)
-11. [UX, accessibilité, performance](#ux-accessibilité-performance)
-12. [Limitations et fonctionnalités reportées](#limitations-et-fonctionnalités-reportées)
+1. [Nouveautés V1.1](#nouveautés-v11)
+2. [Installation et lancement](#installation-et-lancement)
+3. [Scripts](#scripts)
+4. [Espaces de travail REAL et DEMO](#espaces-de-travail-real-et-demo)
+5. [Stockage : fichiers JSON validés](#stockage--fichiers-json-validés)
+6. [Sauvegardes, restauration, annulation](#sauvegardes-restauration-annulation)
+7. [Règles V1 de la stratégie](#règles-v1-de-la-stratégie)
+8. [BANK : SECURED et WITHDRAWN](#bank--secured-et-withdrawn)
+9. [Corrections et suppressions](#corrections-et-suppressions)
+10. [Versionnement de la stratégie](#versionnement-de-la-stratégie)
+11. [Import / export et migration V1.0](#import--export-et-migration-v10)
+12. [Fonctionnalités](#fonctionnalités)
+13. [Stack](#stack)
+14. [Architecture](#architecture)
+15. [Modèle de données](#modèle-de-données)
+16. [Tests](#tests)
+17. [UX, accessibilité, performance](#ux-accessibilité-performance)
+18. [Limitations](#limitations)
 
 ---
 
-## Fonctionnalités
+## Nouveautés V1.1
 
-| Écran                                                                      | Contenu                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Dashboard** (`/dashboard`)                                               | BANK en métrique principale (compteur animé), valeur totale de l'écosystème avec séparation stricte _sécurisé_ vs _à risque_, capital actif, branches vivantes/mortes/matures, tickets, win rate, cote et mise moyennes, total récolté, total perdu, net sécurisé, CLV moyenne, courbe BANK, branches dans le temps, répartition par profil, activité récente.                                                                                            |
-| **Tree** (`/tree`)                                                         | Arbre hiérarchique React Flow : zoom, pan, fit view, recherche + recentrage, focus sur une lignée, collapse/expand des descendants, filtres (statut, profil, génération, plage de capital), taille des nœuds (uniforme / capital / lifetime value, échelle racine carrée), orientation verticale/horizontale, minimap, légende permanente, tooltip au survol, **voyage dans le temps** (slider sur le journal d'événements).                              |
-| **Network** (`/network`)                                                   | Vue organique d3-force : liens parent→enfant uniquement, générations en anneaux, légère dérive des branches vivantes, branches mortes figées, _Freeze layout_, _Re-layout_, surbrillance d'une lignée.                                                                                                                                                                                                                                                    |
-| **Drawer de branche** (clic sur un nœud, partout)                          | Panneau latéral (bottom sheet sur mobile). Onglets **Overview** (prochain palier avec progression), **Rounds** (timeline chronologique des tickets avec leurs conséquences : récolte, BANK, enfant créé, plafond, mort), **Events** (journal technique + contrôle du ledger), **Children**, **Stats**. Actions : _New round_, _Settle_, lignée, pause/reprise, sécuriser vers la BANK, ajustement manuel, notes, changement de profil exceptionnel.       |
-| **Tickets** (`/tickets`)                                                   | Journal filtrable (date, branche, profil, sport, statut, plage de cotes, recherche texte), tri, pagination, export CSV, cartes sur mobile. Détail d'un ticket : CLV, checklist protocole, conséquences, édition journalisée, annulation d'un ticket en attente, **revert** d'un règlement erroné.                                                                                                                                                         |
-| **New round / Settle**                                                     | Création en 2 étapes (branche ACTIVE ou MATURE → formulaire) avec calcul en direct (capital, mise, cote, retour et profit potentiels), mise proposée selon la stratégie, avertissements, **protection même match** (bloquant par défaut, override explicite et journalisé). Règlement avec **aperçu complet avant validation** : avant / résultat / après, split déclenché, BANK, enfant créé (profil modifiable), reliquat de la mère, mort ou maturité. |
-| **BANK** (`/bank`)                                                         | Total sécurisé, aujourd'hui / 7 j / 30 j / total, courbe cumulée, provenance par branche et par profil, destination patrimoniale (non affecté, Livret A, PEA, CTO, autre — informative), timeline filtrable, CSV.                                                                                                                                                                                                                                         |
-| **Branches** (`/branches`, `/branches/[code]`, `/branches/[code]/lineage`) | Table triable de toutes les branches, page détaillée, **lignée** (ancêtres → branche → descendants) avec capital cumulé, BANK cumulée, vivantes/mortes, meilleure branche, rounds.                                                                                                                                                                                                                                                                        |
-| **Analytics** (`/analytics`)                                               | Comparaison HARVEST / BALANCED / GROWTH (moyenne **et médiane**), win rate global et par sport, tranche de cote, profil, compétition ; break-even `1/odds`, intervalle de Wilson à 95 %, edge affiché seulement au-delà d'un échantillon minimum configurable.                                                                                                                                                                                            |
-| **Candidates** (`/candidates`)                                             | _Shadow portfolio_ : matchs analysés mais non joués (WATCH / ELIGIBLE / REJECTED), checklist, résultat, CLV, statistiques à mise plate, conversion en ticket en un clic.                                                                                                                                                                                                                                                                                  |
-| **Simulation** (`/simulation`)                                             | Monte Carlo local dans un **Web Worker**, qui réutilise le vrai moteur de règles : médiane, moyenne, P25/P75/P90/P95 de la BANK, probabilités d'atteindre 1 000 / 5 000 / 10 000 / 50 000 €, probabilité d'extinction, branches survivantes, éventail de percentiles dans le temps. Seed reproductible, annulable, jusqu'à 100 000 runs.                                                                                                                  |
-| **Settings** (`/settings`)                                                 | Toute la stratégie, centralisée et versionnée (historique des réglages), export/import JSON, exports CSV, outils de développement.                                                                                                                                                                                                                                                                                                                        |
-| **Activity** (`/activity`)                                                 | Flux paginé des événements (gains, pertes, récoltes, BANK, naissances, morts…).                                                                                                                                                                                                                                                                                                                                                                           |
-| **Command palette**                                                        | `Ctrl+K` : nouveau ticket, chercher une branche, BANK, graphe, créer une branche, simulation…                                                                                                                                                                                                                                                                                                                                                             |
-
-## Stack
-
-- **Next.js 16** (App Router, Turbopack) · **React 19** · **TypeScript strict** (`noUncheckedIndexedAccess`)
-- **Tailwind CSS 4** (tokens CSS, thème sombre prioritaire + thème clair)
-- **SQLite** via **better-sqlite3** + **Drizzle ORM** (migrations versionnées avec drizzle-kit)
-- **Zod 4** (validation de toutes les entrées, des réglages et des sauvegardes)
-- **@xyflow/react** (React Flow) + **d3-hierarchy** pour l'arbre, **d3-force / d3-zoom** pour le réseau
-- **Recharts** pour les graphiques, **Radix UI** (dialogues, onglets, menus, tooltips), **cmdk**, **lucide-react**
-- **Vitest** + **React Testing Library**, **ESLint** (config Next + règles React Compiler), **Prettier**
+- **Plus de base de données.** SQLite, better-sqlite3, Drizzle et les migrations ont disparu. Chaque espace de
+  travail est un **fichier JSON versionné et validé** (`data/<workspace>/state.json`), écrit de façon
+  **atomique** (fichier temporaire → fsync → renommage) à travers une file de mutations.
+- **Deux espaces isolés : REAL et DEMO.** REAL démarre vide et n'est jamais pré-rempli ; DEMO contient le jeu de
+  démonstration et peut être réinitialisé à volonté. Un sélecteur permanent, un badge `REAL DATA` et un bandeau
+  `DEMO / SIMULATION DATA` indiquent en permanence quelles données sont affichées.
+- **Snapshots automatiques** avant chaque changement annulable, historique des sauvegardes, **Undo** du dernier
+  changement (« Last change: … [Undo] »), restauration d'un snapshot quelconque.
+- **Règles V1 appliquées strictement en REAL** : P1 à **2,80 × S**, mise = **tout le capital**, cote
+  **≤ 1,30**, **une branche par match**, **un seul jalon post-P1 par round gagné**. En DEMO, chaque écart est
+  possible mais explicite, journalisé et étiqueté _Outside V1_.
+- **BANK** : statut `SECURED` / `WITHDRAWN`, date de retrait, destination ; l'argent ne revient jamais dans
+  l'arbre.
+- **Corrections « DELETE / REBUILD FROM THIS POINT »** avec aperçu d'impact, snapshot préalable, archivage par
+  défaut et suppression définitive sur confirmation tapée.
+- **Versionnement de la stratégie** (`strategyVersion` 1.0 + révision) enregistré sur chaque branche et ticket.
 
 ## Installation et lancement
 
-Prérequis : **Node.js ≥ 22** (LTS) et npm. Aucune autre dépendance système (le binaire SQLite est fourni par
-`better-sqlite3`).
+Prérequis : **Node.js ≥ 22** et npm. Aucune dépendance native, aucune base à installer.
 
 ```bash
 npm install
-npm run db:migrate   # crée ./data/celltree.db et applique les migrations (optionnel : fait aussi au démarrage)
-npm run db:seed      # optionnel : charge le jeu de démonstration dans une base vide
 npm run dev          # http://localhost:3000
 ```
 
-Au premier lancement sur une base vide, le dashboard propose **Create root branch** ou **Load demo data**.
+Au premier lancement, l'espace **REAL** est vide : tous les montants valent 0,00 €, les moyennes affichent
+« — » et les graphiques un état vide. Pour explorer l'application avec des données fictives : sélecteur
+**DEMO** (barre latérale) → **Initialize demo data**. Les fichiers ne sont créés qu'à la première écriture.
 
 Production locale :
 
@@ -83,117 +78,131 @@ npm run build
 npm run start        # http://localhost:3000
 ```
 
+Variable optionnelle : `CELLTREE_DATA_DIR` (dossier des espaces, `./data` par défaut — voir `.env.example`).
+
 ## Scripts
 
-| Script                                    | Rôle                                                                          |
-| ----------------------------------------- | ----------------------------------------------------------------------------- |
-| `npm run dev`                             | Serveur de développement                                                      |
-| `npm run build` / `npm run start`         | Build et serveur de production                                                |
-| `npm run lint`                            | ESLint (zéro avertissement toléré)                                            |
-| `npm run typecheck`                       | `tsc --noEmit`                                                                |
-| `npm run test` / `npm run test:watch`     | Vitest                                                                        |
-| `npm run format` / `npm run format:check` | Prettier                                                                      |
-| `npm run db:migrate`                      | Applique les migrations versionnées (`./drizzle`)                             |
-| `npm run db:seed`                         | Charge la démo **uniquement si la base est vide**                             |
-| `npm run db:reset`                        | Efface le ledger puis recharge la démo (refusé si `NODE_ENV=production`)      |
-| `npm run db:generate`                     | Génère une nouvelle migration après modification de `src/server/db/schema.ts` |
+| Script                                    | Rôle                               |
+| ----------------------------------------- | ---------------------------------- |
+| `npm run dev`                             | Serveur de développement           |
+| `npm run build` / `npm run start`         | Build et serveur de production     |
+| `npm run lint`                            | ESLint (zéro avertissement toléré) |
+| `npm run typecheck`                       | `tsc --noEmit`                     |
+| `npm run test` / `npm run test:watch`     | Vitest                             |
+| `npm run format` / `npm run format:check` | Prettier                           |
 
-## Base de données
+Il n'y a plus de `db:migrate`, `db:seed`, `db:generate` ni `db:reset` : l'initialisation et la
+réinitialisation de DEMO se font depuis l'interface, et REAL n'est jamais pré-rempli.
 
-- Fichier par défaut : `./data/celltree.db` (ignoré par git). Modifiable avec `CELLTREE_DB_PATH`
-  (voir `.env.example`).
-- Pragmas : WAL, clés étrangères activées, `busy_timeout`.
-- Le schéma n'est **jamais** créé à la main : il provient des migrations versionnées de `./drizzle`
-  (appliquées par `npm run db:migrate` et automatiquement au premier accès du serveur).
-- Contraintes de sécurité au niveau SQL : montant BANK strictement positif, capital ≥ 0, mise > 0,
-  cote > 1, **un seul ticket en attente par branche** (index unique partiel), codes de branche uniques.
+## Espaces de travail REAL et DEMO
 
-## Tests
+|                     | REAL                                                    | DEMO                                                           |
+| ------------------- | ------------------------------------------------------- | -------------------------------------------------------------- |
+| Fichier             | `data/real/state.json` + `data/real/backups/`           | `data/demo/state.json` + `data/demo/backups/`                  |
+| Contenu initial     | **vide** (jamais de données de démo)                    | vide, puis **Initialize demo data**                            |
+| Règles V1           | **strictes** (aucun contournement)                      | mêmes règles, contournement explicite et journalisé possible   |
+| Actions spécifiques | **Reset REAL workspace** (taper `RESET REAL`, snapshot) | **Initialize demo data**, **Reset DEMO** (recrée le seul DEMO) |
+| Indicateur          | badge vert `REAL DATA`                                  | badge `DEMO DATA` + bandeau `DEMO / SIMULATION DATA`           |
 
-```bash
-npm run test
+- Le choix de l'espace affiché est une **préférence d'interface** (cookie `celltree-workspace`). Changer d'espace
+  ne lit ni n'écrit aucune donnée : il n'existe pas de « workspace courant » global côté serveur.
+- **Chaque action et chaque lecture nomme explicitement son espace** : les Server Actions reçoivent le workspace
+  affiché par la page, les routes API un paramètre `?ws=REAL|DEMO`.
+- Un fichier appartenant à l'autre espace est refusé au chargement ; un état REAL portant le marqueur de démo est
+  refusé à l'écriture ; aucun bouton ne charge la démo dans REAL ; un fichier DEMO ne peut pas être importé dans
+  REAL.
+
+## Stockage : fichiers JSON validés
+
+Format (`src/server/state/schema.ts`) :
+
+```jsonc
+{
+  "format": "celltree-state",
+  "schemaVersion": 1,
+  "workspace": "REAL",
+  "strategyVersion": "1.0",
+  "savedAt": "2026-10-01T18:00:00.000Z",
+  "settings": { … },            // toute la stratégie, validée par Zod
+  "settingsHistory": [ … ],     // versions précédentes des réglages
+  "branches": [ … ], "bets": [ … ], "bankTransactions": [ … ], "branchEvents": [ … ], "candidates": [ … ],
+  "archive": [ … ],             // enregistrements retirés par une correction (mode archive)
+  "metadata": { "createdAt", "nextEventId", "strategyRevision", "mutationCount", "demoSeed", "lastChange" }
+}
 ```
 
-136 tests (unitaires, intégration SQLite en mémoire, composants) couvrent notamment :
+Conventions : montants en **centimes entiers**, cotes et ratios en **points de base** (1,30 = 13 000), dates en
+millisecondes epoch, jours de match `AAAA-MM-JJ`.
 
-- arithmétique monétaire : 100 € @1.30 → 130 €, enchaînement 100 → 130 → 169 → 219,70 → 285,61, arrondi,
-  absence d'erreurs de flottants ;
-- **P1** : 285,61 → 100 € BANK + 100 € enfant + 85,61 € mère ; déclencheurs `TARGET_PATH`,
-  `CAPITAL_MULTIPLE`, `WIN_COUNT` ; cotes réelles inférieures à 1.30 ;
-- paliers post-P1 par profil, conservation des centimes, paliers au-delà du plafond ignorés ;
-- **plafond** : 5 000 € @1.30 → 6 500 €, principal 5 000 €, 750 € BANK + 750 € enfant ;
-- perte (branche morte), perte avec mise partielle, **void** (capital restauré, round non compté) ;
-- création de branches et codes, transactions BANK, **protection même match**, limites journalières ;
-- **rollback** complet d'un split si une écriture échoue (collision de code simulée) ;
-- revert d'un règlement, ajustements manuels, changements de profil, pause ;
-- **scénario d'acceptation §71 complet** (`src/server/services/services.test.ts`) ;
-- sauvegarde : aller-retour export/import identique, rejet des fichiers incohérents ;
-- statistiques (médiane, percentiles, Wilson, edge masqué sous l'échantillon minimum), Monte Carlo reproductible ;
-- modèle de graphe (filtres, collapse, focus lignée, instantanés historiques), layout sans chevauchement ;
-- composants React (checklist, badges accessibles) avec Testing Library.
+Cycle d'écriture (`FileStateRepository`, `src/server/state/repository.ts`) :
 
-## Architecture
+1. file de mutations **par espace** (les opérations concurrentes sont sérialisées) ;
+2. chargement de l'état courant (mis en cache, **gelé** en lecture) puis copie de travail ;
+3. application de l'opération métier sur la copie — une exception abandonne simplement la copie ;
+4. **validation d'intégrité complète** (`src/server/state/integrity.ts`) : schéma Zod strict, unicité des ids et
+   des codes, parents et tickets de naissance existants, pas d'orphelin, un seul ticket en attente par branche,
+   capital de chaque branche = Σ des deltas de ses événements, statut/compteurs/P1/paliers/profil/plafond
+   **rejoués depuis le journal** (`replay.ts`), totaux BANK et enfants cohérents, aucune transaction BANK sans
+   branche ni ticket (« BANK fantôme »), cohérence `WITHDRAWN` ↔ date de retrait, marqueur de démo interdit en
+   REAL ;
+5. snapshot automatique éventuel de l'état précédent, puis écriture `state.tmp` → `fsync` → `rename` sur
+   `state.json`.
 
-```
-src/
-├── domain/                 # Logique métier PURE (aucun accès DB, testable seule)
-│   ├── money/              # centimes, points de base, arrondi, parsing, formatage
-│   ├── strategy/           # réglages (Zod, défauts), paliers/milestones, moteur de règles
-│   ├── branches/           # codes A / A1 / A1.2, attribution de profil, lignée, métriques, ledger
-│   ├── bets/               # règles de ticket (1 match), clé d'événement, CLV, tranches de cotes
-│   ├── analytics/          # statistiques (moyenne, médiane, Wilson, synthèse tickets)
-│   └── simulation/         # Monte Carlo (réutilise le moteur)
-├── server/
-│   ├── db/                 # schéma Drizzle, client SQLite, singleton Next
-│   ├── services/           # cas d'usage transactionnels (branches, tickets, BANK, réglages, sauvegarde, démo)
-│   ├── queries/            # read models sérialisables pour l'UI (DTO)
-│   └── actions/            # Server Actions (validation, résultats typés, revalidation)
-├── components/             # UI : primitives, graphes, drawer, dialogues, vues de pages
-├── workers/                # Web Worker de simulation
-└── app/                    # routes App Router (pages + API d'export/lecture)
-drizzle/                    # migrations SQL versionnées
-scripts/                    # db:migrate, db:seed
-```
+Un état invalide n'est **jamais** écrit : `state.json` reste intact. Un fichier corrompu au chargement n'est pas
+utilisé : l'interface affiche les problèmes détectés et propose de restaurer un snapshot (le fichier rejeté est
+déplacé à côté, jamais supprimé).
 
-Flux d'un règlement : l'UI demande un **aperçu** (`previewSettlementAction`) → le service lit l'état et
-appelle le moteur pur `evaluateSettlement(branch, ticket, result, settings, ctx)` qui renvoie un **plan
-déterministe** (nouveau capital, statut, compteurs, transferts BANK, enfants, événements) → après
-confirmation, `settleTicket` réévalue et **persiste le plan dans une seule transaction SQLite**.
+## Sauvegardes, restauration, annulation
 
-## Règles métier
+- **Snapshots automatiques** dans `data/<workspace>/backups/AAAA-MM-JJTHH-mm-ss-SSS.json`, pris avant chaque
+  changement annulable (création, règlement, annulation, correction, ajustement, transfert, statut BANK,
+  réglages, import, reset, restauration). Seuls les **50 plus récents** sont conservés (réglable :
+  _Settings → Automatic snapshots kept_).
+- **Sauvegardes manuelles** (`…-manual.json`, avec note) : **jamais supprimées** par la rétention.
+- **Settings → Backups & snapshots** : historique (type, raison, date, taille), restauration de n'importe quel
+  snapshot, **Restore previous snapshot**. Une restauration prend d'abord un snapshot de l'état courant : elle
+  est elle-même annulable.
+- **Undo** : la barre supérieure affiche « Last change: … [Undo] ». Annuler restaure le snapshot pris juste avant
+  ce changement (les éventuels changements ultérieurs sont signalés avant confirmation).
+
+## Règles V1 de la stratégie
+
+Toutes les valeurs vivent dans les réglages (`src/domain/strategy/settings.ts`) ; le moteur de règles
+(`src/domain/strategy/engine.ts`) est pur et déterministe.
 
 ### Argent et arrondis
 
-- Tous les montants sont des **centimes entiers** (100 € = 10 000). Cotes, pourcentages et multiples sont
-  des **points de base** entiers (1.30 = 13 000 ; 25 % = 2 500 ; 2,8561 × S = 28 561).
-- Chaque produit pouvant créer des fractions de centime est calculé exactement (BigInt) et arrondi **une
-  seule fois** au centime le plus proche, demi éloigné de zéro.
-- Les répartitions n'arrondissent jamais indépendamment : la dernière part est le reste, la somme des
-  parts est toujours exactement le total.
-- Helpers : `calculateReturn`, `calculateProfit`, `applyBp`, `roundMoney`, `parseMoney`, `formatMoney`
-  (`src/domain/money`).
+- Montants en **centimes entiers**, cotes/pourcentages/multiples en **points de base** entiers.
+- Produits calculés exactement (BigInt) et arrondis **une seule fois** au centime (demi éloigné de zéro) ;
+  les répartitions donnent la dernière part au reste, la somme est toujours exacte.
 
-### Deux univers séparés : capital actif et BANK
+### Tickets
 
-L'argent envoyé en BANK **ne revient jamais** dans les branches : aucune fonction ne débite la BANK, la
-base refuse les montants négatifs, et une branche morte ne peut pas être ressuscitée par la BANK. La
-destination (Livret A, PEA, CTO…) est purement informative.
+- **1 ticket = 1 seul match**, **Winamax uniquement** (non négociable). Confirmation « single match » obligatoire,
+  noms ressemblant à un combiné refusés.
+- **Mise = tout le capital** de la branche ACTIVE ; pour une branche MATURE, le **principal plafonné**. En REAL
+  le champ est verrouillé ; si Winamax n'accepte pas le montant, la branche attend — aucun ticket n'est
+  obligatoire.
+- **Cote maximale 1,30** (bloquante en REAL). Cote minimale du protocole 1,18 (avertissement). Couloirs
+  **informatifs** par profil : HARVEST 1,18–1,24, BALANCED 1,22–1,27, GROWTH 1,25–1,30.
+- **Une branche par match** : même match (nom normalisé + jour) déjà en attente sur une autre branche → refusé en
+  REAL ; contournement explicite possible en DEMO (ou simple avertissement si la politique est `WARN`).
+- Un seul ticket en attente par branche. Limites personnelles optionnelles (tickets simultanés, par jour),
+  contournables avec raison.
+- En **DEMO**, mise partielle, cote > 1,30 et même match sont possibles uniquement via une section explicite
+  « Experiment outside the V1 rules » (case à cocher + raison) ; le ticket reste marqué **Outside V1**.
+- Le même module (`src/domain/bets/policy.ts`) est utilisé par le formulaire et par le serveur.
 
-### P1 (première récolte, commune à tous les profils)
+### P1 (première récolte)
 
-S = capital de naissance. À P1 : **S × 1 → BANK**, **S × 1 → nouvelle branche**, le reste demeure dans la
-mère (multiples configurables). Déclencheur configurable :
+S = capital de naissance. Déclencheur par défaut **`CAPITAL_MULTIPLE` : capital ≥ 2,80 × S** ; alors
+**1 × S → BANK**, **1 × S → nouvelle branche**, le reste demeure dans la mère (au moins 10 % de S).
+`TARGET_PATH` et `WIN_COUNT` restent disponibles comme alternatives explicites.
 
-| Mode                   | Déclenche quand…                                                                                                                                            |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TARGET_PATH` (défaut) | le capital atteint la valeur qu'aurait S après N victoires à la cote cible, avec le même arrondi que les vrais tickets (1.30 × 4 → 285,61 € pour S = 100 €) |
-| `CAPITAL_MULTIPLE`     | capital ≥ S × multiple                                                                                                                                      |
-| `WIN_COUNT`            | N victoires, quelles que soient les cotes réelles                                                                                                           |
+Exemple (test d'acceptation) : 100 € → 130 → 169 → 219,70 → 285,61 € (≥ 280 €) ⇒ BANK 100 €, enfant A1 100 €,
+mère 85,61 €.
 
-Dans tous les modes, la mère doit garder au moins `minMotherRemaining × S` (10 % par défaut). Les tickets
-réels utilisent toujours leur **cote réelle** : à 1.25, P1 arrive simplement plus tard.
-
-### Paliers post-P1 par profil (défauts V1)
+### Paliers post-P1, plafond, maturité
 
 | Profil   | Paliers (× S)   | BANK | Enfant | Reste | Plafond  |
 | -------- | --------------- | ---- | ------ | ----- | -------- |
@@ -201,125 +210,170 @@ réels utilisent toujours leur **cote réelle** : à 1.25, P1 arrive simplement 
 | BALANCED | 6, 12, 24, 48…  | 20 % | 20 %   | 60 %  | 5 000 €  |
 | GROWTH   | 10, 20, 40, 80… | 15 % | 15 %   | 70 %  | 10 000 € |
 
-- Les pourcentages s'appliquent au **capital réel** au moment du palier (qui dépasse souvent le seuil).
-- Ordre d'évaluation après un gain : **P1** → **paliers du profil strictement inférieurs au plafond**
-  (plusieurs peuvent se déclencher dans le même round, boucle bornée) → **plafond**.
-- Une part enfant inférieure au minimum configurable (1 € par défaut) est envoyée en BANK au lieu de créer
-  une branche « poussière ».
-
-### Plafond et maturité
-
-Une branche ACTIVE qui atteint son plafond devient **MATURE** : son principal reste au plafond et
-l'excédent est réparti **50 % BANK / 50 % nouvelle branche** (configurable). Une branche mature rejoue son
-plafond à chaque round (mise proposée = plafond) et ne déclenche plus ni P1 ni paliers. Le plafond est
-**figé sur la branche à sa naissance** (les nouveaux réglages s'appliquent aux nouvelles branches ; un
-changement de profil exceptionnel peut appliquer le nouveau plafond).
+- **Un seul jalon post-P1 par round gagné** : P1 s'il n'est pas fait, sinon au plus **un** palier (le suivant).
+  Une branche encore au-dessus du palier suivant le récoltera à un round gagné ultérieur — jamais de cascade.
+- Les pourcentages s'appliquent au capital réel au moment du palier. Une part enfant sous le minimum (1 €) part
+  en BANK.
+- Au **plafond**, la branche devient **MATURE** : principal maintenu au plafond, excédent réparti 50 % BANK /
+  50 % nouvelle branche. Le plafond est figé sur la branche à sa naissance.
 
 ### Perte, void, rounds
 
-- **Perte** d'une mise égale au capital : capital 0, statut **DEAD**, `diedAt`, événement `DEATH`. La mort est
-  définitive ; la branche reste visible avec tout son historique.
-- **Mise partielle** (autorisée avec avertissement) : en cas de perte, le reliquat non misé reste dans la
-  branche, qui reste vivante — aucun centime ne disparaît du ledger.
-- **VOID** : capital restauré, `voids++`, le compteur de rounds n'avance pas (réglable). Le prochain ticket
-  reprend donc le même numéro de round.
-- Un round est propre à chaque branche ; l'âge se mesure en rounds, pas en jours. Les jours sans pari ne
-  sont jamais une erreur.
+- Un ticket perdu (mise = tout le capital) **tue la branche** : capital 0, `DEAD`, événement `DEATH`. La branche
+  morte reste dans l'arbre, le réseau et tout l'historique.
+- **VOID** : capital restauré, round non compté (réglable).
+- L'âge d'une branche se mesure en rounds ; chaque round garde son historique complet (onglet _Rounds_).
 
-### Profils et naissances
+## BANK : SECURED et WITHDRAWN
 
-- Profil choisi à la création d'une racine ; pour les enfants : attribution **QUOTA** déterministe (le
-  profil le plus en retard sur la distribution 50/35/15 parmi les branches créées automatiquement), ou
-  aléatoire pondérée, ou héritée — et toujours modifiable dans l'aperçu de règlement.
-- Le profil ne change jamais automatiquement ; un changement manuel exceptionnel exige une raison et crée
-  un événement `PROFILE_CHANGED`.
-- Codes lisibles : racines `A`, `B`, … `Z`, `AA` ; enfants `A1`, `A2` ; puis `A1.1`, `A1.2`, `A1.2.3`. Les
-  rangs ne sont jamais réutilisés. Les UUID restent internes.
+- Toute entrée BANK est d'abord **SECURED** : sortie définitive de l'écosystème, même si l'argent est encore sur
+  le solde Winamax.
+- **Mark as withdrawn** (par entrée, ou en lot sur la liste filtrée ; la date du retrait est enregistrée) →
+  **WITHDRAWN** ; **Undo withdrawn** corrige une erreur ; **Set destination** (Livret A, PEA, CTO, autre —
+  informatif).
+- Le dashboard et la page BANK affichent **TOTAL SECURED**, **WITHDRAWN** et **AWAITING WITHDRAWAL**.
+- Aucune opération ne débite la BANK vers une branche ; ces statuts ne touchent jamais au capital des branches.
 
-### Tickets et protections
+## Corrections et suppressions
 
-- **1 ticket = 1 match unique**, Winamax uniquement (`bookmaker = WINAMAX`). La confirmation « single
-  match » est obligatoire et les noms d'événement ressemblant à un combiné (`A - B + C - D`) sont rejetés.
-- Un seul ticket en attente par branche (la branche engage son capital).
-- **Même match sur deux branches** : détecté sur le nom normalisé (accents, casse, « vs »/« - ») + jour du
-  match. Bloqué par défaut ; contournement uniquement avec confirmation explicite et raison journalisée
-  (ou simple avertissement si la politique est `WARN`).
-- Limites optionnelles : tickets en attente simultanés, tickets par jour. Plage de cotes du protocole
-  (avertissement).
+Workflow destructif générique (`src/server/services/correction-service.ts`, dialogue
+`src/components/corrections/correction-dialog.tsx`) : **aperçu d'impact** (exécution à blanc + contrôle
+d'intégrité) → **snapshot automatique** → **confirmation explicite**.
 
-### Auditabilité (event sourcing léger)
+- Les champs descriptifs d'un ticket restent éditables ; l'édition de l'identité d'un ticket réglé est
+  journalisée. Mise, cote et résultat ne sont **jamais** modifiés en place.
+- **Reopen (wrong result)** : le ticket redevient en attente ; ses conséquences et tout ce qui a suivi sur la
+  branche sont retirés, la branche est **reconstruite depuis son journal**.
+- **Delete from here** (ticket réglé) : supprime ce ticket et tout ce qui suit sur sa branche, avec les
+  **sous-arbres entiers** des branches nées de cette partie et l'argent BANK qu'ils ont produit — ni orphelin,
+  ni BANK fantôme. L'aperçu signale l'argent déjà retiré (`WITHDRAWN`).
+- Supprimer un ticket en attente ou annulé ne retire que ce ticket (il n'a jamais déplacé d'argent).
+- Onglet _Events_ : **Delete from here** sur un ajustement manuel, un transfert BANK manuel, un changement de
+  profil ou de statut.
+- **Racine** : _Delete root & subtree_. Une branche enfant se supprime depuis son ticket de naissance.
+- **Candidats** : archivage ou suppression définitive.
+- **Mode** : **Archive** (défaut — les enregistrements sont retirés du registre et conservés dans `archive`) ou
+  **suppression définitive** (taper le code de la branche ou `DELETE`). Les archives peuvent être purgées
+  (`DELETE`). Toute correction est journalisée sur la branche reconstruite et annulable via Undo.
 
-Chaque changement significatif crée un `BranchEvent` (`BIRTH`, `BET_CREATED`, `BET_WON`, `BET_LOST`,
-`BET_VOID`, `BET_CANCELLED`, `HARVEST`, `BANK_TRANSFER`, `SPLIT`, `CHILD_CREATED`, `CAP_REACHED`,
-`PROFILE_CHANGED`, `STATUS_CHANGED`, `MANUAL_ADJUSTMENT`, `DEATH`) avec un **delta de capital signé** et le
-capital après l'événement. La somme des deltas d'une branche doit égaler son capital : c'est vérifié et
-affiché dans l'onglet _Events_ (« Ledger balanced ») et à chaque import de sauvegarde.
+## Versionnement de la stratégie
 
-### Corrections
+- `strategyVersion` (baseline **1.0** = règles V1 définitives) et une **révision** incrémentée à chaque
+  modification d'une règle de stratégie (les préférences d'affichage et de rétention ne la changent pas).
+- Chaque branche et chaque ticket enregistrent la version et la révision sous lesquelles ils ont été créés ;
+  l'historique n'est jamais réinterprété. Les réglages précédents sont conservés dans `settingsHistory`.
 
-Pas de modification silencieuse d'un ticket réglé :
+## Import / export et migration V1.0
 
-- ticket en attente saisi par erreur → **annulation** (soft delete, journalisée) ;
-- mauvais résultat → **revert du règlement** (remet le ticket en attente et restaure exactement la branche,
-  événement `MANUAL_ADJUSTMENT`), possible seulement si c'est le dernier ticket de la branche et qu'il n'a
-  créé ni enfant, ni transfert BANK, ni maturité ;
-- autres cas → **ajustement manuel** du capital (raison obligatoire, journalisé) ;
-- les champs descriptifs restent éditables ; l'édition de l'identité d'un ticket réglé est journalisée.
-  Mise, cote et résultat ne sont jamais éditables directement.
+- **Export** (Settings ou `/api/export/backup?ws=…`) : fichier `celltree-backup` portant l'identité de son espace.
+- **Import** : validation complète (schéma + intégrité). Un fichier **DEMO est toujours refusé dans REAL** (y
+  compris un fichier relabellisé contenant le marqueur de démo) ; un fichier REAL ne peut entrer dans DEMO
+  qu'en cochant **import as a copy**. Remplacer des données existantes exige de taper `REPLACE` ; un snapshot est
+  pris avant.
+- **Migration V1.0** : un export JSON de l'ancienne version SQLite est reconnu et converti (statut BANK
+  `SECURED`, stratégie 1.0, réglages remis aux défauts V1.1). Un export contenant le jeu de démo est traité comme
+  DEMO. Aucune dépendance SQLite n'est nécessaire.
+- **CSV** : tickets, branches, BANK (avec statut et date de retrait), par espace.
 
-### Indicateurs
+## Fonctionnalités
 
-- **Lifetime value** = capital actuel + total envoyé en BANK + capital donné aux enfants (reste visible après la mort).
-- **Total ecosystem value** = BANK + capital des branches vivantes, toujours présenté avec la distinction
-  sécurisé / à risque.
-- **Net secured** = BANK − capital externe injecté dans les racines.
-- **CLV** = cote prise / cote de clôture − 1 (ratio de prix ; la marge du bookmaker n'est pas retirée,
-  documenté dans `src/domain/bets/tickets.ts`).
+| Écran                                                                      | Contenu                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Dashboard** (`/dashboard`)                                               | BANK total sécurisé (retiré / en attente de retrait), valeur totale de l'écosystème (sécurisé vs à risque), capital actif, branches, tickets, win rate, cote et mise moyennes, CLV, courbes, profils, activité — états vides explicites. |
+| **Tree** (`/tree`)                                                         | Arbre React Flow : zoom, recherche, focus lignée, collapse, filtres, tailles, orientation, minimap, légende, branches mortes visibles, **voyage dans le temps**.                                                                         |
+| **Network** (`/network`)                                                   | Vue organique d3-force, générations en anneaux, branches mortes figées.                                                                                                                                                                  |
+| **Drawer de branche**                                                      | Onglets Overview, **Rounds** (historique complet de chaque round), **Events** (journal + ledger + _Delete from here_), Children, Stats ; actions et corrections.                                                                         |
+| **Tickets** (`/tickets`)                                                   | Journal filtrable et paginé, badge _Outside V1_, CSV ; détail avec CLV, checklist, conséquences, **Reopen**, **Delete from here**.                                                                                                       |
+| **New round / Settle**                                                     | Formulaire V1 (mise verrouillée en REAL, cote ≤ 1,30, une branche par match), aperçu complet du règlement avant validation.                                                                                                              |
+| **BANK** (`/bank`)                                                         | Total sécurisé / retiré / en attente, statut par entrée, retrait individuel ou en lot, destination, provenance, courbe, CSV.                                                                                                             |
+| **Branches** (`/branches`, `/branches/[code]`, `/branches/[code]/lineage`) | Table de toutes les branches, page détaillée, lignée.                                                                                                                                                                                    |
+| **Analytics**, **Candidates**, **Simulation**                              | Statistiques (médianes, Wilson, échantillon minimum), shadow portfolio, Monte Carlo local en Web Worker.                                                                                                                                 |
+| **Settings** (`/settings`)                                                 | Stratégie de l'espace affiché, « Workspace storage: REAL — ./data/real/state.json », sauvegardes et snapshots, export/import, archives, DEMO init/reset, reset REAL.                                                                     |
+| **Activity**, **Command palette** (`Ctrl+K`)                               | Flux paginé des événements ; navigation et actions rapides.                                                                                                                                                                              |
+
+## Stack
+
+- **Next.js 16** (App Router, Server Actions) · **React 19** · **TypeScript strict** (`noUncheckedIndexedAccess`)
+- **Persistance** : fichiers JSON par espace, validés par **Zod 4**, écriture atomique (Node `fs`)
+- **Tailwind CSS 4**, **Radix UI**, **cmdk**, **lucide-react**, **sonner**
+- **@xyflow/react** + **d3-hierarchy** (arbre), **d3-force / d3-zoom** (réseau), **Recharts**
+- **Vitest** + **React Testing Library**, **ESLint**, **Prettier**
+
+## Architecture
+
+```
+src/
+├── domain/                 # Logique métier PURE (aucune I/O)
+│   ├── money/              # centimes, points de base, arrondi, parsing, formatage
+│   ├── strategy/           # réglages (Zod, défauts V1), milestones, moteur de règles
+│   ├── branches/           # codes A / A1 / A1.2, profils, lignée, métriques, ledger
+│   ├── bets/               # tickets (1 match), clé d'événement, CLV, politique V1 (policy.ts)
+│   ├── analytics/          # statistiques
+│   └── simulation/         # Monte Carlo (réutilise le moteur)
+├── server/
+│   ├── state/              # schéma du fichier, intégrité, replay, FileStateRepository, sélection d'espace
+│   ├── services/           # opérations pures sur un brouillon d'état (branches, tickets, BANK,
+│   │                       #   corrections, réglages, import/export, démo)
+│   ├── queries/            # read models sérialisables (DTO) calculés depuis l'état
+│   └── actions/            # Server Actions : espace explicite, mutation atomique, Undo
+├── components/             # UI
+├── workers/                # Web Worker de simulation
+└── app/                    # routes (pages + API de lecture/export avec ?ws=)
+```
+
+Flux d'une mutation : action (`workspace`, entrée) → `repository.mutate(workspace, fn, { undoable })` →
+`fn` applique un service pur sur une copie de l'état → validation d'intégrité → snapshot → écriture atomique.
+Flux d'un règlement : aperçu (`previewSettlementAction`, moteur pur `evaluateSettlement`) → confirmation →
+application du plan sur la copie → persistance tout-ou-rien.
 
 ## Modèle de données
 
-| Table                                    | Contenu                                                                                                                                                                                                                                                                                                     |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `branches`                               | id (UUID), code, parent, génération, profil, statut, raison et ticket de naissance, capital de naissance / actuel / pic, plafond, état P1 et niveau de palier, totaux BANK / enfants / pertes, victoires, défaites, voids, rounds, nombre d'enfants, dates (création, maturité, mort, dernier round), notes |
-| `bets`                                   | tickets : branche, séquence, numéro de round, sport, compétition, match, clé d'événement normalisée, équipes, marché, sélection, bookmaker, cote, mise, retour potentiel/réel, P/L, capital avant/après, cote de clôture, protocole, confiance, checklist JSON, raison d'override, annulation               |
-| `bank_transactions`                      | entrées BANK (toujours positives) : branche, ticket, type (`HARVEST`, `MATURE_PROFIT`, `MANUAL`), nature de récolte, profil d'origine, destination, notes                                                                                                                                                   |
-| `branch_events`                          | journal ordonné (id auto-incrémenté), type, montant, delta de capital, capital et statut après, ticket et branche liés, métadonnées JSON, description                                                                                                                                                       |
-| `candidates`                             | shadow portfolio (archivage en soft delete)                                                                                                                                                                                                                                                                 |
-| `strategy_settings` / `settings_history` | réglages courants (JSON validé) et versions précédentes                                                                                                                                                                                                                                                     |
+| Collection         | Contenu                                                                                                                                                                                                      |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `branches`         | id, code, parent, génération, profil, statut, naissance (raison, ticket, événement, capital), capital actuel/pic, plafond, P1, palier, totaux, compteurs, dates, version de stratégie                        |
+| `bets`             | ticket d'un seul match : séquence, round, événement normalisé, marché, sélection, Winamax, cote, mise, retours, capital avant/après, CLV, protocole, override, _outsideV1_, annulation, version de stratégie |
+| `bankTransactions` | entrée BANK positive : branche, ticket, type, nature de récolte, profil d'origine, **statut SECURED/WITHDRAWN**, date de retrait, destination                                                                |
+| `branchEvents`     | journal ordonné (`id` = ordre global) : type, montant, delta de capital signé, capital et statut après, liens, métadonnées, description                                                                      |
+| `candidates`       | shadow portfolio (archivage possible)                                                                                                                                                                        |
+| `archive`          | lots d'enregistrements retirés par une correction en mode archive                                                                                                                                            |
 
-## Sauvegarde et restauration
+## Tests
 
-- **Settings → Export backup (JSON)** : export complet et fidèle (montants en centimes, dates en ms).
-- **Import** : validation stricte (format, types, unicité, références, et capital de chaque branche
-  ré-expliqué par ses événements). Une base non vide exige de taper `REPLACE`, et une **copie de sécurité
-  des données actuelles** est écrite d'abord dans `data/backups/`. Rien n'est jamais écrasé silencieusement.
-- **Exports CSV** : tickets, branches, BANK (UTF-8 avec BOM, séparateur virgule, décimales avec point).
-- Outils de développement (uniquement en `npm run dev`) : _Reset demo data_, _Wipe all data_ — chacun écrit
-  une sauvegarde de sécurité avant d'agir.
+```bash
+npm run test
+```
+
+175 tests (unitaires, services sur état en mémoire, dépôt de fichiers sur dossier temporaire, composants) :
+
+- arithmétique monétaire exacte ; **P1 à 2,80 × S** ; acceptation 100 → 130 → 169 → 219,70 → 285,61 ⇒ BANK 100,
+  enfant 100, mère 85,61 ; mort après perte totale ; un seul jalon par round ;
+- politique V1 : mise complète obligatoire en REAL, cote > 1,30 refusée, une branche par match, overrides DEMO
+  explicites, branche mature au principal plafonné ;
+- **isolation REAL/DEMO**, lecture sans écriture, reset DEMO sans effet sur REAL (octet pour octet), fichier d'un
+  autre espace refusé, démo interdite dans REAL ;
+- **persistance atomique**, état invalide jamais écrit (et aucun snapshot orphelin), opérations concurrentes
+  sérialisées ;
+- snapshots, rétention (manuels conservés), restauration, **Undo** (et annulation de l'undo) ;
+- BANK SECURED ↔ WITHDRAWN sans effet sur les branches, montants négatifs rejetés ;
+- corrections en cascade (reopen, delete from here, événement manuel, racine), absence d'orphelins et de BANK
+  fantôme, archive vs purge et confirmations tapées ;
+- import/export (DEMO → REAL refusé, REAL → DEMO en copie, fichier corrompu rejeté, migration V1.0), CSV ;
+- tableau de bord REAL vide (zéros, « — »), branches mortes et historique du graphe ;
+- statistiques, Monte Carlo reproductible, modèle de graphe, composants React.
 
 ## UX, accessibilité, performance
 
-- Thème sombre prioritaire, thème clair disponible (préférence en cookie, sans flash). Palette des profils
-  (vert / bleu / violet) validée pour les déficiences de vision des couleurs ; le statut n'est jamais porté
-  par la couleur seule (badges texte + icônes : couronne mature, crâne mort, pause).
-- Navigation clavier, libellés ARIA, focus visibles, `prefers-reduced-motion` respecté (pop de naissance,
-  halo de maturité, fondu de mort, flash d'arête, compteur BANK, dérive du réseau).
-- Responsive : cartes verticales, drawer → bottom sheet, tables → cartes ou défilement maîtrisé.
-- Performance : layout de l'arbre mémoïsé, nœuds React Flow mémoïsés, rendu limité aux nœuds visibles au-delà
-  de 250 nœuds, collapse et filtres pour les très grands arbres, positions du réseau mises à jour hors du
-  cycle React, simulation hors du thread principal, journal des tickets paginé côté serveur.
+- Thème sombre prioritaire + clair ; le statut n'est jamais porté par la couleur seule (badges texte + icônes).
+- Navigation clavier, libellés ARIA, focus visibles, `prefers-reduced-motion` respecté.
+- Responsive (drawer → bottom sheet, tables → cartes) ; sélecteur d'espace dans le menu mobile, badge compact.
+- États immuables mis en cache par espace (invalidation sur la date de modification du fichier), index de
+  lecture mémoïsés, simulation hors du thread principal.
 
-## Limitations et fonctionnalités reportées
+## Limitations
 
-- **Recalcul en cascade** d'un ticket réglé ayant déjà produit un split : non proposé (choix de sécurité) ;
-  passer par le revert (si autorisé) ou un ajustement manuel journalisé.
-- **Voyage dans le temps** : le slider rejoue capital et statut de chaque branche ; les totaux BANK/enfants
-  affichés sur les nœuds ne sont pas historisés (masqués en mode historique).
-- **Capture d'écran de ticket** : colonne `screenshot_path` prévue, upload non implémenté.
-- Les modifications de réglages s'appliquent aux évaluations futures ; les plafonds déjà figés sur les
-  branches existantes ne sont pas recalculés.
-- La devise est un paramètre d'affichage (pas de conversion).
-- Sur mobile, le tooltip du graphe est remplacé par le tap qui ouvre le panneau de la branche.
-- `npm audit` signale une vulnérabilité modérée dans une dépendance de **développement** de drizzle-kit
-  (esbuild du serveur de dev d'esbuild-kit) ; elle n'est pas embarquée dans l'application.
-- Node.js ≥ 22 requis (better-sqlite3 13).
+- Application mono-utilisateur locale : la file de mutations est en mémoire dans le processus Next ; ne pas
+  lancer deux serveurs sur le même dossier de données.
+- Les archives de corrections se consultent dans _Settings_ ; les remettre en place passe par Undo ou la
+  restauration d'un snapshot.
+- **Voyage dans le temps** : capital et statut rejoués ; les totaux BANK/enfants des nœuds ne sont pas historisés.
+- Capture d'écran de ticket : champ prévu, upload non implémenté. La devise est un paramètre d'affichage.

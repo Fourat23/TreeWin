@@ -1,10 +1,10 @@
 "use client";
 
-import { Download, ShieldCheck, X } from "lucide-react";
+import { ArrowDownToLine, Download, ShieldCheck, Undo2, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTransition } from "react";
 import { toast } from "sonner";
-import { BANK_DESTINATIONS, PROFILES, type BankDestination } from "@/domain/types";
+import { BANK_DESTINATIONS, BANK_STATUSES, PROFILES, type BankDestination } from "@/domain/types";
 import { MoneyAreaChart } from "@/components/charts/time-charts";
 import { useFormat } from "@/components/providers/format-provider";
 import { useUi } from "@/components/providers/ui-provider";
@@ -17,18 +17,28 @@ import { Input, Select } from "@/components/ui/field";
 import { EmptyState } from "@/components/ui/misc";
 import { DESTINATION_LABEL, HARVEST_LABEL, PROFILE_COLOR_VAR, PROFILE_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/cn";
+import { withWorkspace } from "@/lib/workspace";
 import type { BankDTO, BankFilters } from "@/server/queries/bank";
-import { setBankDestinationAction } from "@/server/actions/data-actions";
+import {
+  markWithdrawnAction,
+  setBankDestinationAction,
+  undoWithdrawnAction,
+} from "@/server/actions/bank-actions";
 
 export function BankView({ data, filters }: { data: BankDTO; filters: BankFilters }) {
   const f = useFormat();
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const { openBranch, notifyMutation } = useUi();
+  const { openBranch, notifyMutation, workspace } = useUi();
   const [pending, startTransition] = useTransition();
   const filtered = Boolean(
-    filters.branch || filters.profile || filters.destination || filters.from || filters.to,
+    filters.branch ||
+    filters.profile ||
+    filters.destination ||
+    filters.status ||
+    filters.from ||
+    filters.to,
   );
 
   const update = (key: string, value: string) => {
@@ -40,12 +50,32 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
 
   const setDestination = (transactionId: string, destination: BankDestination) =>
     startTransition(async () => {
-      const result = await setBankDestinationAction({ transactionId, destination });
+      const result = await setBankDestinationAction(workspace, {
+        transactionIds: [transactionId],
+        destination,
+      });
       if (result.ok) {
         toast.success(`Destination: ${DESTINATION_LABEL[destination]}`);
         notifyMutation();
       } else toast.error(result.message);
     });
+
+  const setWithdrawn = (transactionIds: string[], withdrawn: boolean) =>
+    startTransition(async () => {
+      const result = withdrawn
+        ? await markWithdrawnAction(workspace, { transactionIds })
+        : await undoWithdrawnAction(workspace, { transactionIds });
+      if (result.ok) {
+        toast.success(
+          withdrawn
+            ? `${result.data} entr${result.data === 1 ? "y" : "ies"} marked as withdrawn from Winamax`
+            : "Withdrawal undone — the money is SECURED (still never playable)",
+        );
+        notifyMutation();
+      } else toast.error(result.message);
+    });
+
+  const awaiting = data.transactions.filter((t) => t.status === "SECURED");
 
   const maxBranch = Math.max(1, ...data.byBranch.map((b) => b.amountCents));
   const totalProfiles = Math.max(
@@ -59,16 +89,30 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
         <div className="flex flex-col gap-6 p-6 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="flex items-center gap-2 text-[12px] font-medium tracking-[0.16em] text-fg-muted uppercase">
-              <ShieldCheck className="size-4" /> Secured BANK
+              <ShieldCheck className="size-4" /> Total secured
             </p>
             <AnimatedNumber
-              value={data.totalCents}
+              value={data.status.securedCents}
               format={(v) => f.money(v)}
               className="mt-2 block text-5xl font-semibold tracking-tight sm:text-6xl"
             />
+            <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-sm">
+              <div className="flex items-baseline gap-2">
+                <dt className="text-fg-subtle">Withdrawn</dt>
+                <dd className="num font-semibold text-good" data-testid="bank-withdrawn">
+                  {f.money(data.status.withdrawnCents)}
+                </dd>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <dt className="text-fg-subtle">Awaiting withdrawal</dt>
+                <dd className="num font-semibold text-warning" data-testid="bank-awaiting">
+                  {f.money(data.status.awaitingWithdrawalCents)}
+                </dd>
+              </div>
+            </dl>
             <p className="mt-2 max-w-lg text-sm text-fg-subtle">
               One-way: money secured here never returns to the branches and cannot revive a dead
-              one. Destinations are informative.
+              one. WITHDRAWN only records that it actually left Winamax.
             </p>
           </div>
           <dl className="grid grid-cols-2 gap-x-8 gap-y-3 sm:grid-cols-4">
@@ -173,7 +217,7 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
             description="Every contribution, newest first"
             action={
               <Button variant="ghost" size="sm" asChild>
-                <a href="/api/export/csv/bank" download>
+                <a href={withWorkspace("/api/export/csv/bank", workspace)} download>
                   <Download /> CSV
                 </a>
               </Button>
@@ -219,6 +263,19 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
                 </option>
               ))}
             </Select>
+            <Select
+              aria-label="Status"
+              className="h-8 w-32 text-xs"
+              value={filters.status ?? ""}
+              onChange={(e) => update("status", e.target.value)}
+            >
+              <option value="">All statuses</option>
+              {BANK_STATUSES.map((st) => (
+                <option key={st} value={st}>
+                  {st}
+                </option>
+              ))}
+            </Select>
             <Input
               aria-label="From"
               type="date"
@@ -242,8 +299,29 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
                 <X /> Clear
               </Button>
             ) : null}
-            <span className="ml-auto num text-sm text-fg-muted">
-              {f.money(data.filteredTotalCents)}
+            <span className="ml-auto flex items-center gap-3">
+              {awaiting.length > 0 ? (
+                <Button
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => {
+                    const total = awaiting.reduce((sum, t) => sum + t.amountCents, 0);
+                    if (
+                      window.confirm(
+                        `Mark ${awaiting.length} SECURED entr${awaiting.length === 1 ? "y" : "ies"} (${f.money(total)}) as withdrawn from Winamax today?`,
+                      )
+                    ) {
+                      setWithdrawn(
+                        awaiting.map((t) => t.id),
+                        true,
+                      );
+                    }
+                  }}
+                >
+                  <ArrowDownToLine /> Mark {filtered ? "filtered" : "all"} as withdrawn
+                </Button>
+              ) : null}
+              <span className="num text-sm text-fg-muted">{f.money(data.filteredTotalCents)}</span>
             </span>
           </div>
           {data.transactions.length === 0 ? (
@@ -285,8 +363,36 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
                           : (t.notes ?? "")}
                       </span>
                     </p>
-                    <p className="mt-0.5 text-xs text-fg-subtle">{f.dateTime(t.createdAt)}</p>
+                    <p className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
+                      {f.dateTime(t.createdAt)}
+                      {t.status === "WITHDRAWN" ? (
+                        <Badge tone="good">
+                          WITHDRAWN{t.withdrawnAt ? ` · ${f.date(t.withdrawnAt)}` : ""}
+                        </Badge>
+                      ) : (
+                        <Badge tone="warning">SECURED · on Winamax</Badge>
+                      )}
+                    </p>
                   </div>
+                  {t.status === "SECURED" ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={pending}
+                      onClick={() => setWithdrawn([t.id], true)}
+                    >
+                      <ArrowDownToLine /> Mark as withdrawn
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={pending}
+                      onClick={() => setWithdrawn([t.id], false)}
+                    >
+                      <Undo2 /> Undo withdrawn
+                    </Button>
+                  )}
                   <Select
                     aria-label={`Destination of ${t.branchCode} transfer`}
                     className="h-8 w-36 text-xs"

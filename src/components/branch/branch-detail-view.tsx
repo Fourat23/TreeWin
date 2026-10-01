@@ -14,14 +14,22 @@ import {
   Plus,
   Scale,
   Tag,
+  Trash2,
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { isPlayable } from "@/domain/types";
 import { useFormat } from "@/components/providers/format-provider";
 import { useUi } from "@/components/providers/ui-provider";
 import { Button } from "@/components/ui/button";
-import { ProfileBadge, ProfileDot, ResultBadge, StatusBadge } from "@/components/ui/domain-badges";
+import {
+  OutsideV1Badge,
+  ProfileBadge,
+  ProfileDot,
+  ResultBadge,
+  StatusBadge,
+} from "@/components/ui/domain-badges";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/menu";
 import { Progress } from "@/components/ui/misc";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -98,9 +106,11 @@ function BranchHeader({
   onAudit: () => void;
 }) {
   const f = useFormat();
-  const { openNewTicket, openSettle, openBranch } = useUi();
+  const { openNewTicket, openSettle, openBranch, openCorrection, closeBranch } = useUi();
+  const router = useRouter();
   const { branch, parent } = detail;
   const dead = branch.status === "DEAD";
+  const leave = () => (variant === "page" ? router.push("/branches") : closeBranch());
   const capRatio = branch.capCents > 0 ? branch.currentCapitalCents / branch.capCents : 0;
 
   return (
@@ -172,33 +182,62 @@ function BranchHeader({
               </Link>
             </Button>
           ) : null}
-          {!dead ? (
-            <Menu
-              trigger={
-                <Button variant="ghost" size="icon-sm" aria-label="More actions">
-                  <MoreHorizontal />
-                </Button>
-              }
-            >
-              <MenuItem onSelect={() => onDialog("pause")} disabled={Boolean(detail.pendingBetId)}>
-                {branch.status === "PAUSED" ? <Play /> : <Pause />}
-                {branch.status === "PAUSED" ? "Resume branch" : "Pause branch"}
+          <Menu
+            trigger={
+              <Button variant="ghost" size="icon-sm" aria-label="More actions">
+                <MoreHorizontal />
+              </Button>
+            }
+          >
+            {!dead ? (
+              <>
+                <MenuItem
+                  onSelect={() => onDialog("pause")}
+                  disabled={Boolean(detail.pendingBetId)}
+                >
+                  {branch.status === "PAUSED" ? <Play /> : <Pause />}
+                  {branch.status === "PAUSED" ? "Resume branch" : "Pause branch"}
+                </MenuItem>
+                <MenuItem onSelect={() => onDialog("bank")} disabled={Boolean(detail.pendingBetId)}>
+                  <Landmark /> Secure to BANK…
+                </MenuItem>
+                <MenuSeparator />
+                <MenuItem
+                  onSelect={() => onDialog("adjust")}
+                  disabled={Boolean(detail.pendingBetId)}
+                >
+                  <PenLine /> Manual adjustment…
+                </MenuItem>
+                <MenuItem onSelect={() => onDialog("notes")}>
+                  <NotebookPen /> Edit notes…
+                </MenuItem>
+                <MenuItem onSelect={() => onDialog("profile")}>
+                  <Tag /> Change profile (exceptional)…
+                </MenuItem>
+                <MenuSeparator />
+              </>
+            ) : null}
+            {parent === null ? (
+              <MenuItem
+                onSelect={() =>
+                  openCorrection({ kind: "DELETE_BRANCH", branchId: branch.id }, { onDone: leave })
+                }
+              >
+                <Trash2 /> Delete root & subtree…
               </MenuItem>
-              <MenuItem onSelect={() => onDialog("bank")} disabled={Boolean(detail.pendingBetId)}>
-                <Landmark /> Secure to BANK…
+            ) : branch.birthBetId ? (
+              <MenuItem
+                onSelect={() =>
+                  openCorrection(
+                    { kind: "DELETE_TICKET", betId: branch.birthBetId as string },
+                    { onDone: leave },
+                  )
+                }
+              >
+                <Trash2 /> Delete from its birth ticket ({parent.code})…
               </MenuItem>
-              <MenuSeparator />
-              <MenuItem onSelect={() => onDialog("adjust")} disabled={Boolean(detail.pendingBetId)}>
-                <PenLine /> Manual adjustment…
-              </MenuItem>
-              <MenuItem onSelect={() => onDialog("notes")}>
-                <NotebookPen /> Edit notes…
-              </MenuItem>
-              <MenuItem onSelect={() => onDialog("profile")}>
-                <Tag /> Change profile (exceptional)…
-              </MenuItem>
-            </Menu>
-          ) : null}
+            ) : null}
+          </Menu>
         </div>
       </div>
 
@@ -399,7 +438,10 @@ function RoundCard({ bet, events }: { bet: BetDTO; events: BranchEventDTO[] }) {
             {f.round(bet.roundNumber)}{" "}
             <span className="font-normal text-fg-subtle">· {f.day(bet.eventDate)}</span>
           </p>
-          <ResultBadge result={bet.result} cancelled={Boolean(bet.cancelledAt)} />
+          <span className="flex gap-1">
+            {bet.outsideV1 ? <OutsideV1Badge reason={bet.overrideReason} /> : null}
+            <ResultBadge result={bet.result} cancelled={Boolean(bet.cancelledAt)} />
+          </span>
         </div>
         <p className="mt-1 truncate text-sm text-fg">{bet.eventName}</p>
         <p className="truncate text-xs text-fg-subtle">
@@ -469,8 +511,16 @@ function Mini({
   );
 }
 
+/** Events a user may delete "from here" (tickets are corrected from the ticket itself). */
+function isCuttable(e: BranchEventDTO): boolean {
+  if (e.relatedBetId !== null) return false;
+  if (e.type === "MANUAL_ADJUSTMENT") return e.metadata?.kind === "CAPITAL_CORRECTION";
+  return e.type === "BANK_TRANSFER" || e.type === "PROFILE_CHANGED" || e.type === "STATUS_CHANGED";
+}
+
 function EventsTab({ detail }: { detail: BranchDetailDTO }) {
   const f = useFormat();
+  const { openCorrection } = useUi();
   const { ledger } = detail;
   return (
     <div className="flex flex-col gap-4">
@@ -499,6 +549,7 @@ function EventsTab({ detail }: { detail: BranchDetailDTO }) {
               <th className="px-3 py-2 font-medium">Event</th>
               <th className="px-3 py-2 text-right font-medium">Δ capital</th>
               <th className="px-3 py-2 text-right font-medium">Capital</th>
+              <th className="px-1 py-2" aria-label="Corrections" />
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -527,6 +578,19 @@ function EventsTab({ detail }: { detail: BranchDetailDTO }) {
                 </td>
                 <td className="px-3 py-2 text-right num whitespace-nowrap text-fg-muted">
                   {e.capitalAfterCents !== null ? f.money(e.capitalAfterCents) : "—"}
+                </td>
+                <td className="px-1 py-1.5 text-right">
+                  {isCuttable(e) ? (
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Delete event #${e.id} and everything after it`}
+                      title="Delete from here (impact preview first)"
+                      onClick={() => openCorrection({ kind: "DELETE_FROM_EVENT", eventId: e.id })}
+                    >
+                      <Trash2 />
+                    </Button>
+                  ) : null}
                 </td>
               </tr>
             ))}

@@ -1,5 +1,6 @@
 "use client";
 
+import { withWorkspace } from "@/lib/workspace";
 import {
   Background,
   BackgroundVariant,
@@ -59,7 +60,7 @@ export function TreeView({ branches }: { branches: BranchSummaryDTO[] }) {
       <div className="flex h-full items-center justify-center">
         <EmptyState
           title="No branch yet"
-          description="Create a root branch from the dashboard, or load the demo data, to see the tree grow."
+          description="Create a root branch from the dashboard to see the tree grow (demo data lives only in the DEMO workspace)."
         />
       </div>
     );
@@ -81,7 +82,7 @@ interface HoverState {
 
 function TreeCanvas({ branches: liveBranches }: { branches: BranchSummaryDTO[] }) {
   const f = useFormat();
-  const { openBranch, selectedBranch } = useUi();
+  const { openBranch, selectedBranch, workspace } = useUi();
   const flow = useReactFlow();
   const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -247,7 +248,9 @@ function TreeCanvas({ branches: liveBranches }: { branches: BranchSummaryDTO[] }
       setHistory(null);
       return;
     }
-    const response = await fetch("/api/tree/history", { cache: "no-store" });
+    const response = await fetch(withWorkspace("/api/tree/history", workspace), {
+      cache: "no-store",
+    });
     const data = (await response.json()) as { events: HistoryEvent[] };
     setHistory(data.events);
     setHistoryIndex(Math.max(0, data.events.length - 1));

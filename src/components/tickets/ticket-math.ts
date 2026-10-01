@@ -1,4 +1,6 @@
+import { evaluateTicketPolicy, type PolicyViolation, type TicketRules } from "@/domain/bets/policy";
 import { calculateReturn, parseMoney, parseOdds, type Cents } from "@/domain/money";
+import type { BranchStatus, Profile, Workspace } from "@/domain/types";
 
 export interface TicketPreview {
   stakeCents: Cents | null;
@@ -8,39 +10,64 @@ export interface TicketPreview {
   stakeError: string | null;
   oddsError: string | null;
   warnings: string[];
+  /** V1 rule violations (same function as the server). Non-overridable ones block the ticket. */
+  violations: PolicyViolation[];
 }
 
-/** Live ticket calculation shown while typing (pure — same arithmetic as the engine). */
+/**
+ * Live ticket calculation shown while typing (pure — same arithmetic and the same V1 policy
+ * function as the server, so the form never promises what the server would refuse).
+ */
 export function computeTicketPreview(input: {
-  capitalCents: Cents;
-  suggestedStakeCents: Cents;
+  workspace: Workspace;
+  branch: {
+    code: string;
+    profile: Profile;
+    status: BranchStatus;
+    currentCapitalCents: Cents;
+    capCents: Cents;
+  };
+  rules: TicketRules;
   stake: string;
   odds: string;
-  oddsMinBp: number;
-  oddsMaxBp: number;
+  sameEventBranchCodes?: readonly string[];
+  pendingLimitReached?: boolean;
+  dailyLimitReached?: boolean;
 }): TicketPreview {
   const stakeCents = input.stake.trim() ? parseMoney(input.stake) : null;
   const oddsBp = input.odds.trim() ? parseOdds(input.odds) : null;
   let stakeError: string | null = null;
   let oddsError: string | null = null;
-  const warnings: string[] = [];
 
   if (input.stake.trim() && stakeCents === null) stakeError = "Invalid amount";
   else if (stakeCents !== null && stakeCents <= 0) stakeError = "Stake must be positive";
-  else if (stakeCents !== null && stakeCents > input.capitalCents)
+  else if (stakeCents !== null && stakeCents > input.branch.currentCapitalCents) {
     stakeError = "Stake exceeds the branch capital";
-  else if (stakeCents !== null && stakeCents < input.suggestedStakeCents) {
-    warnings.push(
-      "Stake below the strategy stake. If lost, the unstaked remainder stays in the branch.",
-    );
   }
-
   if (input.odds.trim() && oddsBp === null) oddsError = "Odds must be a decimal ≥ 1.01";
-  else if (oddsBp !== null && (oddsBp < input.oddsMinBp || oddsBp > input.oddsMaxBp)) {
-    warnings.push("Odds outside the configured protocol range.");
+
+  let warnings: string[] = [];
+  let violations: PolicyViolation[] = [];
+  if (stakeCents !== null && oddsBp !== null && !stakeError && !oddsError) {
+    const policy = evaluateTicketPolicy({
+      workspace: input.workspace,
+      rules: input.rules,
+      branch: input.branch,
+      stakeCents,
+      oddsBp,
+      sameEventBranchCodes: input.sameEventBranchCodes ?? [],
+      pendingLimitReached: input.pendingLimitReached ?? false,
+      dailyLimitReached: input.dailyLimitReached ?? false,
+    });
+    warnings = policy.warnings;
+    violations = policy.violations;
+    const oddsViolation = violations.find((v) => v.code === "ODDS_ABOVE_MAX" && !v.overridable);
+    if (oddsViolation)
+      oddsError = `Above the ${(input.rules.oddsMaxBp / 10_000).toFixed(2)} hard maximum — refused in REAL`;
   }
 
-  const valid = stakeCents !== null && stakeCents > 0 && oddsBp !== null && !stakeError;
+  const valid =
+    stakeCents !== null && stakeCents > 0 && oddsBp !== null && !stakeError && !oddsError;
   const potentialReturnCents = valid ? calculateReturn(stakeCents, oddsBp) : null;
   return {
     stakeCents: stakeError ? null : stakeCents,
@@ -53,5 +80,6 @@ export function computeTicketPreview(input: {
     stakeError,
     oddsError,
     warnings,
+    violations,
   };
 }

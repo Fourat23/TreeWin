@@ -1,4 +1,3 @@
-import { eq, isNull } from "drizzle-orm";
 import {
   mean,
   median,
@@ -8,10 +7,8 @@ import {
 } from "@/domain/analytics/stats";
 import { clvBp, oddsBucketOf, ODDS_BUCKETS } from "@/domain/bets/tickets";
 import { branchRoiBp, lifetimeValueCents } from "@/domain/branches/metrics";
-import type { StrategySettings } from "@/domain/strategy/settings";
 import { CANDIDATE_STATUSES, PROFILES, type CandidateStatus, type Profile } from "@/domain/types";
-import type { DbOrTx } from "../db/client";
-import { bets, branches, candidates } from "../db/schema";
+import type { WorkspaceState } from "../state/schema";
 
 const DAY_MS = 86_400_000;
 
@@ -65,9 +62,9 @@ function groupBy<T>(items: readonly T[], keyOf: (item: T) => string): Map<string
   return map;
 }
 
-export function getAnalytics(db: DbOrTx, settings: StrategySettings): AnalyticsDTO {
-  const minSample = settings.analytics.minSampleSize;
-  const branchRows = db.select().from(branches).all();
+export function getAnalytics(state: WorkspaceState): AnalyticsDTO {
+  const minSample = state.settings.analytics.minSampleSize;
+  const branchRows = state.branches;
 
   const profiles = PROFILES.map((profile): ProfileAnalytics => {
     const rows = branchRows.filter((b) => b.profile === profile);
@@ -85,8 +82,8 @@ export function getAnalytics(db: DbOrTx, settings: StrategySettings): AnalyticsD
       survivalRounds: dist(dead.map((b) => b.roundCount)),
       daysToDeath: dist(
         dead
-          .filter((b) => b.diedAt)
-          .map((b) => ((b.diedAt as Date).getTime() - b.createdAt.getTime()) / DAY_MS),
+          .filter((b) => b.diedAt !== null)
+          .map((b) => ((b.diedAt as number) - b.createdAt) / DAY_MS),
       ),
       bankPerBranchCents: dist(rows.map((b) => b.totalBankGeneratedCents)),
       peakCapitalCents: {
@@ -98,21 +95,19 @@ export function getAnalytics(db: DbOrTx, settings: StrategySettings): AnalyticsD
     };
   });
 
-  const ticketRows = db
-    .select({
-      result: bets.result,
-      oddsBp: bets.oddsBp,
-      stakeCents: bets.stakeCents,
-      profitLossCents: bets.profitLossCents,
-      closingOddsBp: bets.closingOddsBp,
-      sport: bets.sport,
-      competition: bets.competition,
-      profile: branches.profile,
-    })
-    .from(bets)
-    .innerJoin(branches, eq(bets.branchId, branches.id))
-    .where(isNull(bets.cancelledAt))
-    .all();
+  const profileOf = new Map(branchRows.map((b) => [b.id, b.profile]));
+  const ticketRows = state.bets
+    .filter((b) => b.cancelledAt === null && profileOf.has(b.branchId))
+    .map((b) => ({
+      result: b.result,
+      oddsBp: b.oddsBp,
+      stakeCents: b.stakeCents,
+      profitLossCents: b.profitLossCents,
+      closingOddsBp: b.closingOddsBp,
+      sport: b.sport,
+      competition: b.competition,
+      profile: profileOf.get(b.branchId) as Profile,
+    }));
   const samples = ticketRows.map((r) => ({
     ...r,
     clvBp: clvBp(r.oddsBp, r.closingOddsBp),
@@ -143,15 +138,15 @@ export function getAnalytics(db: DbOrTx, settings: StrategySettings): AnalyticsD
     ).sort((a, b) => (bucketOrder.get(a.key) ?? 0) - (bucketOrder.get(b.key) ?? 0)),
     byProfile: breakdown((s) => s.profile),
     byCompetition: breakdown((s) => s.competition),
-    candidates: getCandidateStats(db, minSample),
+    candidates: getCandidateStats(state, minSample),
   };
 }
 
 export type CandidateStats = TicketGroupStats & { status: CandidateStatus };
 
 /** Shadow-portfolio performance per protocol status, at a flat 1-unit stake. */
-export function getCandidateStats(db: DbOrTx, minSample: number): CandidateStats[] {
-  const candidateRows = db.select().from(candidates).where(isNull(candidates.archivedAt)).all();
+export function getCandidateStats(state: WorkspaceState, minSample: number): CandidateStats[] {
+  const candidateRows = state.candidates.filter((c) => c.archivedAt === null);
   return CANDIDATE_STATUSES.map((status) => {
     const group: TicketSample[] = candidateRows
       .filter((c) => c.protocolStatus === status)

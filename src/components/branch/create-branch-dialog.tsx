@@ -36,7 +36,7 @@ export function CreateBranchDialog({
 }
 
 function CreateBranchForm({ onCreated }: { onCreated: (id: string) => void }) {
-  const { hints } = useUi();
+  const { hints, workspace } = useUi();
   const [profile, setProfile] = useState<Profile>(hints.defaultProfile);
   const [capital, setCapital] = useState("100");
   const [notes, setNotes] = useState("");
@@ -50,7 +50,7 @@ function CreateBranchForm({ onCreated }: { onCreated: (id: string) => void }) {
       return;
     }
     startTransition(async () => {
-      const result = await createRootBranchAction({
+      const result = await createRootBranchAction(workspace, {
         profile,
         capitalCents,
         notes: notes || undefined,

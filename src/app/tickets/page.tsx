@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { NewRoundButton } from "@/components/tickets/new-round-button";
 import { TicketsJournal } from "@/components/tickets/tickets-journal";
 import { PageContainer, PageHeader } from "@/components/ui/misc";
-import { getDb } from "@/server/db";
 import { listTickets, ticketFiltersSchema } from "@/server/queries/tickets";
+import { loadPageState } from "@/server/state/page";
 
 export const metadata: Metadata = { title: "Tickets" };
 
@@ -17,7 +17,8 @@ export default async function TicketsPage({
     Object.entries(raw).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]),
   );
   const filters = ticketFiltersSchema.parse(flat);
-  const data = listTickets(getDb(), filters);
+  const { state } = await loadPageState();
+  const data = listTickets(state, filters);
   return (
     <PageContainer>
       <PageHeader

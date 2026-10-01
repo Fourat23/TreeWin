@@ -4,14 +4,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { TicketDetailView } from "@/components/tickets/ticket-detail-view";
 import { PageContainer } from "@/components/ui/misc";
-import { getDb } from "@/server/db";
 import { getTicketDetail } from "@/server/queries/tickets";
+import { loadPageState } from "@/server/state/page";
 
 export const metadata: Metadata = { title: "Ticket" };
 
 export default async function TicketPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const detail = getTicketDetail(getDb(), id);
+  const { state } = await loadPageState();
+  const detail = getTicketDetail(state, id);
   if (!detail) notFound();
   return (
     <PageContainer>

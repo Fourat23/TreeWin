@@ -20,13 +20,15 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { useUi } from "@/components/providers/ui-provider";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/misc";
 import { cn } from "@/lib/cn";
 import { THEME_COOKIE } from "@/lib/theme";
 import { Logo } from "./logo";
+import { UndoBar } from "./undo-bar";
+import { WorkspaceBadge, WorkspaceSwitch } from "./workspace-switch";
 
 const NAV: { section: string; items: { href: string; label: string; icon: typeof Activity }[] }[] =
   [
@@ -123,19 +125,22 @@ export function AppShell({
   children: ReactNode;
   initialTheme: "dark" | "light";
 }) {
-  const { openNewTicket, openPalette } = useUi();
+  const { openNewTicket, openPalette, workspace } = useUi();
   const pathname = usePathname();
   // The mobile menu belongs to the page it was opened on: navigating closes it.
+  // Switching workspace closes it too.
+  const menuKey = `${workspace}:${pathname}`;
   const [menuOpenedAt, setMenuOpenedAt] = useState<string | null>(null);
-  const mobileOpen = menuOpenedAt === pathname;
-  const setMobileOpen = (open: boolean) => setMenuOpenedAt(open ? pathname : null);
+  const mobileOpen = menuOpenedAt === menuKey;
+  const setMobileOpen = (open: boolean) => setMenuOpenedAt(open ? menuKey : null);
 
   return (
     <div className="min-h-dvh">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[232px] flex-col border-r border-border bg-surface/60 px-3 py-4 backdrop-blur lg:flex">
-        <Link href="/dashboard" className="mb-5 flex items-center gap-2.5 px-2">
+        <Link href="/dashboard" className="mb-4 flex items-center gap-2.5 px-2">
           <Logo />
         </Link>
+        <WorkspaceSwitch className="mb-4" />
         <Button
           variant="primary"
           className="mb-2 w-full justify-start"
@@ -178,6 +183,7 @@ export function AppShell({
           <Logo />
         </Link>
         <div className="flex items-center gap-1">
+          <WorkspaceBadge className="mr-1" compact />
           <Button variant="ghost" size="icon-sm" onClick={openPalette} aria-label="Search">
             <Search />
           </Button>
@@ -202,6 +208,7 @@ export function AppShell({
       </header>
       {mobileOpen ? (
         <div className="fixed inset-x-0 top-14 bottom-0 z-30 overflow-y-auto border-t border-border bg-bg px-4 py-5 lg:hidden">
+          <WorkspaceSwitch className="mb-5" />
           <NavLinks onNavigate={() => setMobileOpen(false)} />
           <div className="mt-6 flex items-center justify-between border-t border-border pt-4">
             <Link href="/settings" className="flex items-center gap-2 text-sm text-fg-muted">
@@ -212,7 +219,29 @@ export function AppShell({
         </div>
       ) : null}
 
-      <main className="lg:pl-[232px]">{children}</main>
+      <main
+        className="lg:pl-[232px]"
+        style={{ "--chrome-h": workspace === "DEMO" ? "4rem" : "2.25rem" } as CSSProperties}
+      >
+        <div className="sticky top-14 z-20 flex h-9 items-center justify-between gap-3 border-b border-border bg-bg/85 px-4 py-1 backdrop-blur lg:top-0 lg:px-8">
+          <WorkspaceBadge className="hidden lg:inline-flex" />
+          <UndoBar />
+        </div>
+        {workspace === "DEMO" ? (
+          <div
+            role="status"
+            className="flex h-7 items-center justify-center gap-2 overflow-hidden border-b border-warning/40 bg-warning/12 px-4 text-center text-[12px] font-semibold tracking-[0.06em] text-warning"
+            data-testid="demo-banner"
+          >
+            <FlaskConical className="size-3.5 shrink-0" aria-hidden />
+            <span className="truncate">
+              DEMO / SIMULATION DATA
+              <span className="hidden sm:inline"> — nothing on these pages is real money</span>
+            </span>
+          </div>
+        ) : null}
+        {children}
+      </main>
     </div>
   );
 }

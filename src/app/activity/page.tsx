@@ -6,8 +6,8 @@ import { ActivityFeed } from "@/components/dashboard/activity-feed";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageContainer, PageHeader } from "@/components/ui/misc";
-import { getDb } from "@/server/db";
 import { getActivityFeed } from "@/server/queries/overview";
+import { loadPageState } from "@/server/state/page";
 
 export const metadata: Metadata = { title: "Activity" };
 
@@ -20,7 +20,8 @@ export default async function ActivityPage({
 }) {
   const { before } = await searchParams;
   const cursor = cursorSchema.parse(before);
-  const { items, nextCursor } = getActivityFeed(getDb(), { limit: 60, before: cursor });
+  const { state } = await loadPageState();
+  const { items, nextCursor } = getActivityFeed(state, { limit: 60, before: cursor });
   return (
     <PageContainer className="max-w-3xl">
       <PageHeader

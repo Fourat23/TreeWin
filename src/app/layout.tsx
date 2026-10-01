@@ -8,12 +8,16 @@ import { AppShell } from "@/components/layout/app-shell";
 import { FormatProvider } from "@/components/providers/format-provider";
 import { UiProvider } from "@/components/providers/ui-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { WorkspaceErrorScreen } from "@/components/layout/workspace-error";
 import { THEME_COOKIE } from "@/lib/theme";
-import { getDb } from "@/server/db";
-import { getSettings } from "@/server/services/settings-service";
+import { getRepository } from "@/server/state";
+import { createEmptyState } from "@/server/state/integrity";
+import { StateLoadError } from "@/server/state/repository";
+import type { WorkspaceState } from "@/server/state/schema";
+import { requestWorkspace } from "@/server/state/workspace";
 import "./globals.css";
 
-// Every page reads the local SQLite ledger: never prerender or cache at build time.
+// Every page reads the local workspace files: never prerender or cache at build time.
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
@@ -28,7 +32,19 @@ export const viewport: Viewport = {
 };
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const settings = getSettings(getDb());
+  const workspace = await requestWorkspace();
+  const repository = getRepository();
+  let state: WorkspaceState;
+  let loadError: StateLoadError | null = null;
+  try {
+    state = await repository.load(workspace);
+  } catch (error) {
+    if (!(error instanceof StateLoadError)) throw error;
+    loadError = error;
+    state = createEmptyState(workspace);
+  }
+  const settings = state.settings;
+  const change = state.metadata.lastChange;
   // Theme preference lives in a cookie so the server renders the right theme (no flash).
   const theme = (await cookies()).get(THEME_COOKIE)?.value === "light" ? "light" : "dark";
   return (
@@ -44,15 +60,53 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
         >
           <TooltipProvider>
             <UiProvider
+              workspace={workspace}
               hints={{
                 oddsMinBp: settings.odds.minBp,
                 oddsMaxBp: settings.odds.maxBp,
                 sameEventPolicy: settings.sameEventPolicy,
-                isDev: process.env.NODE_ENV !== "production",
                 defaultProfile: "BALANCED",
+                strategyVersion: settings.strategyVersion,
+                corridors: {
+                  HARVEST: {
+                    minBp: settings.profiles.HARVEST.oddsTargetMinBp,
+                    maxBp: settings.profiles.HARVEST.oddsTargetMaxBp,
+                  },
+                  BALANCED: {
+                    minBp: settings.profiles.BALANCED.oddsTargetMinBp,
+                    maxBp: settings.profiles.BALANCED.oddsTargetMaxBp,
+                  },
+                  GROWTH: {
+                    minBp: settings.profiles.GROWTH.oddsTargetMinBp,
+                    maxBp: settings.profiles.GROWTH.oddsTargetMaxBp,
+                  },
+                },
               }}
+              lastChange={
+                change
+                  ? {
+                      label: change.label,
+                      at: change.at,
+                      laterChanges: Math.max(
+                        0,
+                        state.metadata.mutationCount - change.mutationCount,
+                      ),
+                    }
+                  : null
+              }
             >
-              <AppShell initialTheme={theme}>{children}</AppShell>
+              <AppShell initialTheme={theme}>
+                {loadError ? (
+                  <WorkspaceErrorScreen
+                    workspace={workspace}
+                    path={loadError.path}
+                    problems={loadError.problems}
+                    backups={await repository.listBackups(workspace)}
+                  />
+                ) : (
+                  children
+                )}
+              </AppShell>
             </UiProvider>
           </TooltipProvider>
           <Toaster

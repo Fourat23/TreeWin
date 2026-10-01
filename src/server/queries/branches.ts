@@ -1,4 +1,3 @@
-import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { ancestorsOf, buildTreeIndex, descendantsOf } from "@/domain/branches/lineage";
 import { bestWinStreak, branchRoiBp, verifyLedger, winRate } from "@/domain/branches/metrics";
 import { formatMoney, formatMultiple, type Cents } from "@/domain/money";
@@ -6,44 +5,21 @@ import { suggestedStakeCents } from "@/domain/strategy/engine";
 import { nextMilestone, planP1 } from "@/domain/strategy/milestones";
 import type { StrategySettings } from "@/domain/strategy/settings";
 import { isPlayable, type BranchStatus } from "@/domain/types";
-import type { DbOrTx } from "../db/client";
-import { bankTransactions, bets, branchEvents, branches, type BranchRow } from "../db/schema";
 import { findBranchByIdOrCode } from "../services/internal";
+import type { BranchRecord, WorkspaceState } from "../state/schema";
 import type { BranchDetailDTO, BranchSummaryDTO, MilestoneDTO, PlayableBranchDTO } from "./dto";
-import { toBankDTO, toBetDTO, toBranchSummary, toEventDTO } from "./mappers";
+import { indexState, toBankDTO, toBetDTO, toBranchSummary, toEventDTO } from "./mappers";
 
-export type BranchIndex = Map<string, Pick<BranchRow, "code" | "profile">>;
-
-export function loadBranchIndex(db: DbOrTx): BranchIndex {
-  const rows = db
-    .select({ id: branches.id, code: branches.code, profile: branches.profile })
-    .from(branches)
-    .all();
-  return new Map(rows.map((r) => [r.id, { code: r.code, profile: r.profile }]));
-}
-
-function pendingBranchIds(db: DbOrTx): Set<string> {
-  const rows = db
-    .select({ branchId: bets.branchId })
-    .from(bets)
-    .where(and(eq(bets.result, "PENDING"), isNull(bets.cancelledAt)))
-    .all();
-  return new Set(rows.map((r) => r.branchId));
-}
-
-export function listBranchSummaries(db: DbOrTx): BranchSummaryDTO[] {
-  const pending = pendingBranchIds(db);
-  return db
-    .select()
-    .from(branches)
-    .orderBy(asc(branches.createdAt))
-    .all()
-    .map((row) => toBranchSummary(row, pending.has(row.id)));
+export function listBranchSummaries(state: WorkspaceState): BranchSummaryDTO[] {
+  const { pendingBranchIds } = indexState(state);
+  return [...state.branches]
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((row) => toBranchSummary(row, pendingBranchIds.has(row.id)));
 }
 
 const DAY_MS = 86_400_000;
 
-function describeMilestone(row: BranchRow, settings: StrategySettings): MilestoneDTO {
+function describeMilestone(row: BranchRecord, settings: StrategySettings): MilestoneDTO {
   const fmt = (c: Cents) =>
     formatMoney(c, { locale: settings.locale, currency: settings.currency });
   const effectiveStatus: BranchStatus =
@@ -120,62 +96,41 @@ function describeMilestone(row: BranchRow, settings: StrategySettings): Mileston
 }
 
 export function getBranchDetail(
-  db: DbOrTx,
+  state: WorkspaceState,
   idOrCode: string,
-  settings: StrategySettings,
   now = Date.now(),
 ): BranchDetailDTO | null {
-  const row = findBranchByIdOrCode(db, idOrCode);
+  const row = findBranchByIdOrCode(state, idOrCode);
   if (!row) return null;
-  const index = loadBranchIndex(db);
-  const pending = pendingBranchIds(db);
+  const { branchById, pendingBranchIds } = indexState(state);
 
-  const betRows = db
-    .select()
-    .from(bets)
-    .where(eq(bets.branchId, row.id))
-    .orderBy(asc(bets.sequence))
-    .all();
-  const eventRows = db
-    .select()
-    .from(branchEvents)
-    .where(eq(branchEvents.branchId, row.id))
-    .orderBy(asc(branchEvents.id))
-    .all();
-  const bankRows = db
-    .select()
-    .from(bankTransactions)
-    .where(eq(bankTransactions.branchId, row.id))
-    .orderBy(desc(bankTransactions.createdAt))
-    .all();
-  const childRows = db
-    .select()
-    .from(branches)
-    .where(eq(branches.parentId, row.id))
-    .orderBy(asc(branches.createdAt))
-    .all();
-  const parentRow = row.parentId
-    ? db.select().from(branches).where(eq(branches.id, row.parentId)).get()
-    : undefined;
+  const betRows = state.bets
+    .filter((b) => b.branchId === row.id)
+    .sort((a, b) => a.sequence - b.sequence);
+  const eventRows = state.branchEvents
+    .filter((e) => e.branchId === row.id)
+    .sort((a, b) => a.id - b.id);
+  const bankRows = state.bankTransactions
+    .filter((t) => t.branchId === row.id)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  const childRows = state.branches
+    .filter((b) => b.parentId === row.id)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  const parentRow = row.parentId ? branchById.get(row.parentId) : undefined;
+  const descendants = descendantsOf(buildTreeIndex(state.branches), row.id);
 
-  const allTree = db
-    .select({ id: branches.id, parentId: branches.parentId, status: branches.status })
-    .from(branches)
-    .all();
-  const descendants = descendantsOf(buildTreeIndex(allTree), row.id);
-
-  const live = betRows.filter((b) => !b.cancelledAt);
+  const live = betRows.filter((b) => b.cancelledAt === null);
   const decided = live.filter((b) => b.result === "WON" || b.result === "LOST");
   const avgOddsBp =
     decided.length > 0
       ? Math.round(decided.reduce((sum, b) => sum + b.oddsBp, 0) / decided.length)
       : null;
   const betById = new Map(betRows.map((b) => [b.id, b]));
-  const summary = toBranchSummary(row, pending.has(row.id));
-  const end = row.diedAt?.getTime() ?? now;
+  const summary = toBranchSummary(row, pendingBranchIds.has(row.id));
+  const end = row.diedAt ?? now;
 
   return {
-    branch: { ...summary, notes: row.notes },
+    branch: { ...summary, notes: row.notes, birthBetId: row.birthBetId },
     parent: parentRow
       ? {
           id: parentRow.id,
@@ -184,13 +139,12 @@ export function getBranchDetail(
           status: parentRow.status,
         }
       : null,
-    children: childRows.map((c) => toBranchSummary(c, pending.has(c.id))),
+    children: childRows.map((c) => toBranchSummary(c, pendingBranchIds.has(c.id))),
     bets: betRows.map((b) => toBetDTO(b, row)),
-    events: eventRows.map((e) => toEventDTO(e, index)),
-    bankTransactions: bankRows.map((t) => {
-      const bet = t.relatedBetId ? betById.get(t.relatedBetId) : undefined;
-      return toBankDTO(t, row.code, bet ?? null);
-    }),
+    events: eventRows.map((e) => toEventDTO(e, branchById)),
+    bankTransactions: bankRows.map((t) =>
+      toBankDTO(t, row.code, t.relatedBetId ? betById.get(t.relatedBetId) : null),
+    ),
     ledger: verifyLedger(eventRows, row.currentCapitalCents),
     stats: {
       winRate: winRate(row.wins, row.losses),
@@ -199,9 +153,9 @@ export function getBranchDetail(
       roiBp: branchRoiBp(summary.ltvCents, row.birthCapitalCents),
       descendants: descendants.length,
       aliveDescendants: descendants.filter((d) => d.status !== "DEAD").length,
-      lifespanDays: Math.max(0, Math.floor((end - row.createdAt.getTime()) / DAY_MS)),
+      lifespanDays: Math.max(0, Math.floor((end - row.createdAt) / DAY_MS)),
     },
-    milestone: describeMilestone(row, settings),
+    milestone: describeMilestone(row, state.settings),
     suggestedStakeCents: suggestedStakeCents(row),
     pendingBetId: live.find((b) => b.result === "PENDING")?.id ?? null,
   };
@@ -223,10 +177,10 @@ export interface LineageDTO {
   };
 }
 
-export function getLineage(db: DbOrTx, idOrCode: string): LineageDTO | null {
-  const row = findBranchByIdOrCode(db, idOrCode);
+export function getLineage(state: WorkspaceState, idOrCode: string): LineageDTO | null {
+  const row = findBranchByIdOrCode(state, idOrCode);
   if (!row) return null;
-  const all = listBranchSummaries(db);
+  const all = listBranchSummaries(state);
   const index = buildTreeIndex(all);
   const self = index.byId.get(row.id);
   if (!self) return null;
@@ -262,15 +216,11 @@ export function getLineage(db: DbOrTx, idOrCode: string): LineageDTO | null {
 }
 
 /** Branches that can open a new round right now (ACTIVE/MATURE without pending ticket). */
-export function listPlayableBranches(db: DbOrTx): PlayableBranchDTO[] {
-  const pending = pendingBranchIds(db);
-  return db
-    .select()
-    .from(branches)
-    .where(or(eq(branches.status, "ACTIVE"), eq(branches.status, "MATURE")))
-    .orderBy(asc(branches.code))
-    .all()
-    .filter((b) => isPlayable(b.status) && !pending.has(b.id))
+export function listPlayableBranches(state: WorkspaceState): PlayableBranchDTO[] {
+  const { pendingBranchIds } = indexState(state);
+  return state.branches
+    .filter((b) => isPlayable(b.status) && !pendingBranchIds.has(b.id))
+    .sort((a, b) => a.code.localeCompare(b.code))
     .map((b) => ({
       id: b.id,
       code: b.code,
@@ -295,32 +245,29 @@ export interface TreeHistoryDTO {
   }[];
 }
 
-export function getTreeHistory(db: DbOrTx): TreeHistoryDTO {
-  const rows = db
-    .select({
-      id: branchEvents.id,
-      branchId: branchEvents.branchId,
-      createdAt: branchEvents.createdAt,
-      capitalAfterCents: branchEvents.capitalAfterCents,
-      statusAfter: branchEvents.statusAfter,
-    })
-    .from(branchEvents)
-    .where(
-      inArray(branchEvents.type, [
-        "BIRTH",
-        "BET_WON",
-        "BET_LOST",
-        "BANK_TRANSFER",
-        "CHILD_CREATED",
-        "CAP_REACHED",
-        "DEATH",
-        "MANUAL_ADJUSTMENT",
-        "STATUS_CHANGED",
-      ]),
-    )
-    .orderBy(asc(branchEvents.id))
-    .all();
+const HISTORY_TYPES = new Set([
+  "BIRTH",
+  "BET_WON",
+  "BET_LOST",
+  "BANK_TRANSFER",
+  "CHILD_CREATED",
+  "CAP_REACHED",
+  "DEATH",
+  "MANUAL_ADJUSTMENT",
+  "STATUS_CHANGED",
+]);
+
+export function getTreeHistory(state: WorkspaceState): TreeHistoryDTO {
   return {
-    events: rows.map((r) => ({ ...r, createdAt: r.createdAt.getTime() })),
+    events: state.branchEvents
+      .filter((e) => HISTORY_TYPES.has(e.type))
+      .sort((a, b) => a.id - b.id)
+      .map((e) => ({
+        id: e.id,
+        branchId: e.branchId,
+        createdAt: e.createdAt,
+        capitalAfterCents: e.capitalAfterCents,
+        statusAfter: e.statusAfter,
+      })),
   };
 }

@@ -1,135 +1,123 @@
-import { asc, eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
-import { verifyLedger } from "@/domain/branches/metrics";
-import { branchEvents, branches } from "../db/schema";
-import { getDashboard } from "../queries/overview";
-import { getBranchDetail, getLineage } from "../queries/branches";
-import { listTickets, ticketFiltersSchema } from "../queries/tickets";
-import {
-  bankCsv,
-  branchesCsv,
-  exportBackup,
-  importBackup,
-  isDatabaseEmpty,
-  ticketsCsv,
-  validateBackup,
-} from "./backup-service";
-import { seedDemoData } from "./demo-seed";
+import { createEmptyState, findIntegrityProblems } from "../state/integrity";
+import { bankCsv, exportWorkspace, prepareImport, ticketsCsv } from "./backup-service";
+import { createRootBranch } from "./branch-service";
+import { buildDemoState } from "./demo-seed";
 import { DomainError } from "./errors";
-import { getSettings } from "./settings-service";
-import { setupTestDb } from "./test-helpers";
+import { workspaceHarness } from "./test-helpers";
 
-const NOW = new Date("2026-10-01T12:00:00");
-
-function seeded() {
-  const handle = setupTestDb();
-  seedDemoData(handle.db, NOW);
-  return handle;
+function realWithData() {
+  const h = workspaceHarness("REAL");
+  const a = createRootBranch(h.state, { profile: "BALANCED", capitalCents: 10_000 }, h.ctx());
+  for (let i = 0; i < 4; i += 1) h.play(a.id, 13_000, "WON");
+  return h.state;
 }
 
-describe("demo seed", () => {
-  it("builds a demonstrative tree with every status and profile", () => {
-    const { db } = seeded();
-    const rows = db.select().from(branches).orderBy(asc(branches.code)).all();
-    const byCode = Object.fromEntries(rows.map((b) => [b.code, b]));
-    expect(Object.keys(byCode).sort()).toEqual([
-      "A",
-      "A1",
-      "A2",
-      "A2.1",
-      "B",
-      "B1",
-      "B2",
-      "B3",
-      "C",
-    ]);
-    expect(byCode.A?.status).toBe("ACTIVE");
-    expect(byCode.A1?.status).toBe("DEAD");
-    expect(byCode.B?.status).toBe("MATURE");
-    expect(new Set(rows.map((b) => b.profile))).toEqual(new Set(["HARVEST", "BALANCED", "GROWTH"]));
-    for (const branch of rows) {
-      const events = db
-        .select()
-        .from(branchEvents)
-        .where(eq(branchEvents.branchId, branch.id))
-        .orderBy(asc(branchEvents.id))
-        .all();
-      expect(verifyLedger(events, branch.currentCapitalCents).balanced).toBe(true);
-    }
+function rejection(fn: () => unknown): DomainError {
+  try {
+    fn();
+  } catch (error) {
+    expect(error).toBeInstanceOf(DomainError);
+    expect((error as DomainError).code).toBe("IMPORT_REJECTED");
+    return error as DomainError;
+  }
+  throw new Error("expected IMPORT_REJECTED");
+}
+
+describe("export / import", () => {
+  it("round-trips a REAL export into REAL", () => {
+    const state = realWithData();
+    const file = JSON.parse(JSON.stringify(exportWorkspace(state)));
+    expect(file).toMatchObject({ format: "celltree-backup", kind: "EXPORT", workspace: "REAL" });
+    const { state: imported, preview } = prepareImport(file, "REAL");
+    expect(preview).toMatchObject({ source: "REAL", target: "REAL", asCopy: false });
+    expect(preview.counts).toMatchObject({ branches: 2, tickets: 4, bankTransactions: 1 });
+    expect(imported.branches).toEqual(state.branches);
+    expect(imported.metadata.lastChange).toBeNull();
   });
 
-  it("refuses to seed a non-empty database", () => {
-    const { db } = seeded();
-    expect(() => seedDemoData(db, NOW)).toThrow(DomainError);
-  });
-
-  it("feeds the read models", () => {
-    const { db } = seeded();
-    const dashboard = getDashboard(db, NOW);
-    expect(dashboard.isEmpty).toBe(false);
-    expect(dashboard.branchCounts).toMatchObject({ total: 9, dead: 3, mature: 1 });
-    expect(dashboard.totals.ecosystemCents).toBe(
-      dashboard.totals.bankCents + dashboard.totals.activeCapitalCents,
+  it("never imports a DEMO file into REAL", () => {
+    const demo = JSON.parse(JSON.stringify(exportWorkspace(buildDemoState(new Date()).state)));
+    const error = rejection(() => prepareImport(demo, "REAL"));
+    expect(error.message).toMatch(/DEMO file can never be imported into the REAL workspace/);
+    // Even when the file claims to be REAL, demo-seeded content is refused.
+    rejection(() =>
+      prepareImport(
+        { ...demo, workspace: "REAL", state: { ...demo.state, workspace: "REAL" } },
+        "REAL",
+      ),
     );
-    expect(dashboard.tickets.pending).toBe(3);
-    expect(dashboard.bankSeries.at(-1)?.cumulativeCents).toBe(dashboard.totals.bankCents);
+  });
 
-    const detail = getBranchDetail(db, "A", getSettings(db));
-    expect(detail?.ledger.balanced).toBe(true);
-    expect(detail?.children.map((c) => c.code)).toEqual(["A1", "A2"]);
-    expect(detail?.pendingBetId).not.toBeNull();
+  it("imports a REAL file into DEMO only as an explicit copy", () => {
+    const file = JSON.parse(JSON.stringify(exportWorkspace(realWithData())));
+    rejection(() => prepareImport(file, "DEMO"));
+    const { state, preview } = prepareImport(file, "DEMO", { asCopy: true });
+    expect(preview.asCopy).toBe(true);
+    expect(state.workspace).toBe("DEMO");
+    expect(findIntegrityProblems(state, "DEMO")).toEqual([]);
+  });
 
-    const lineage = getLineage(db, "A2");
-    expect(lineage?.ancestors.map((a) => a.code)).toEqual(["A"]);
-    expect(lineage?.descendants.map((d) => d.code)).toEqual(["A2.1"]);
+  it("rejects corrupted files with every integrity problem listed", () => {
+    const file = JSON.parse(JSON.stringify(exportWorkspace(realWithData())));
+    file.state.bankTransactions[0].amountCents += 1; // phantom BANK cent
+    const error = rejection(() => prepareImport(file, "REAL"));
+    expect((error.details?.problems as string[]).join(" ")).toMatch(/BANK total/);
+    rejection(() => prepareImport({ hello: "world" }, "REAL"));
+  });
 
-    const list = listTickets(db, ticketFiltersSchema.parse({ status: "LOST" }));
-    expect(list.total).toBe(3);
-    const search = listTickets(db, ticketFiltersSchema.parse({ q: "getafe" }));
-    expect(search.rows.map((r) => r.eventName)).toEqual(["Real Madrid - Getafe"]);
+  it("migrates a V1.0 (SQLite era) export", () => {
+    const state = realWithData();
+    const legacy = {
+      format: "celltree-backup",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      migration: "0000_init",
+      settings: { currency: "EUR", locale: "fr-FR", roundLabel: "Round", roundShortLabel: "R" },
+      settingsHistory: [],
+      branches: state.branches.map(({ strategyVersion: _v, strategyRevision: _r, ...b }) => b),
+      bets: state.bets.map(({ strategyVersion: _v, strategyRevision: _r, ...b }) => b),
+      bankTransactions: state.bankTransactions.map(({ status: _s, withdrawnAt: _w, ...t }) => t),
+      branchEvents: state.branchEvents.map((e) =>
+        e.type === "BIRTH" ? { ...e, metadata: { reason: e.metadata?.reason } } : e,
+      ),
+      candidates: [],
+    };
+    const { state: migrated, preview } = prepareImport(legacy, "REAL");
+    expect(preview.source).toBe("LEGACY");
+    expect(migrated.bankTransactions[0]).toMatchObject({ status: "SECURED", withdrawnAt: null });
+    expect(migrated.branches.map((b) => b.strategyVersion)).toEqual(["1.0", "1.0"]);
+    expect(findIntegrityProblems(migrated, "REAL")).toEqual([]);
   });
 });
 
-describe("backup", () => {
-  it("round-trips every row through export and import", () => {
-    const source = seeded();
-    const backup = JSON.parse(JSON.stringify(exportBackup(source.db, NOW)));
-
-    const target = setupTestDb();
-    expect(isDatabaseEmpty(target.db)).toBe(true);
-    const counts = importBackup(target.db, backup);
-    expect(counts.branches).toBe(9);
-
-    const again = JSON.parse(JSON.stringify(exportBackup(target.db, NOW)));
-    expect(again.branches).toEqual(backup.branches);
-    expect(again.bets).toEqual(backup.bets);
-    expect(again.bankTransactions).toEqual(backup.bankTransactions);
-    expect(again.branchEvents).toEqual(backup.branchEvents);
-    expect(again.candidates).toEqual(backup.candidates);
+describe("demo seed", () => {
+  it("builds a valid DEMO-only state through the real services", () => {
+    const { state, summary } = buildDemoState(new Date("2026-10-01T10:00:00"));
+    expect(state.workspace).toBe("DEMO");
+    expect(state.metadata.demoSeed).not.toBeNull();
+    expect(findIntegrityProblems(state, "DEMO")).toEqual([]);
+    expect(findIntegrityProblems({ ...state, workspace: "REAL" }, "REAL").join(" ")).toMatch(
+      /demo data/,
+    );
+    expect(summary.branches).toBe(state.branches.length);
+    const statuses = new Set(state.branches.map((b) => b.status));
+    expect(statuses).toEqual(new Set(["ACTIVE", "MATURE", "DEAD"]));
+    expect(state.bankTransactions.some((t) => t.status === "WITHDRAWN")).toBe(true);
+    expect(state.bets.some((b) => b.overrideReason !== null)).toBe(true);
+    expect(state.bets.filter((b) => b.result === "PENDING")).toHaveLength(3);
   });
+});
 
-  it("rejects malformed or inconsistent backups without touching the database", () => {
-    const source = seeded();
-    const backup = JSON.parse(JSON.stringify(exportBackup(source.db, NOW)));
-    expect(() => validateBackup({ ...backup, format: "other" })).toThrow(DomainError);
-
-    const tampered = structuredClone(backup);
-    tampered.branches[0].currentCapitalCents += 1;
-    expect(() => validateBackup(tampered)).toThrow(/integrity/);
-
-    const orphan = structuredClone(backup);
-    orphan.bets[0].branchId = "missing";
-    const target = setupTestDb();
-    expect(() => importBackup(target.db, orphan)).toThrow(DomainError);
-    expect(isDatabaseEmpty(target.db)).toBe(true);
-  });
-
-  it("exports CSV files with a header and decimal amounts", () => {
-    const { db } = seeded();
-    const tickets = ticketsCsv(db);
-    expect(tickets.startsWith("﻿id,branch,profile,round")).toBe(true);
-    expect(tickets).toContain(",1.30,100.00,130.00,WON,");
-    expect(branchesCsv(db).split("\r\n").filter(Boolean)).toHaveLength(10);
-    expect(bankCsv(db)).toContain(",100.00,HARVEST,P1,");
+describe("CSV", () => {
+  it("exports tickets and BANK entries with status columns", () => {
+    const state = realWithData();
+    const tickets = ticketsCsv(state).split("\r\n");
+    expect(tickets[0]).toMatch(/^﻿id,branch,profile,round/);
+    expect(tickets).toHaveLength(6); // header + 4 tickets + trailing newline
+    const bank = bankCsv(state);
+    expect(bank).toMatch(/status,withdrawn_at/);
+    expect(bank).toMatch(/,SECURED,,UNALLOCATED,/);
+    expect(ticketsCsv(createEmptyState("REAL")).split("\r\n")).toHaveLength(2);
   });
 });

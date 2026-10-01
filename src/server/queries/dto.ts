@@ -6,6 +6,7 @@ import type { LedgerCheck } from "@/domain/branches/metrics";
 import type { Cents } from "@/domain/money";
 import type {
   BankDestination,
+  BankStatus,
   BankTxType,
   BetResult,
   BirthReason,
@@ -44,6 +45,8 @@ export interface BranchSummaryDTO {
   diedAt: number | null;
   maturedAt: number | null;
   lastRoundAt: number | null;
+  strategyVersion: string;
+  strategyRevision: number;
 }
 
 export interface BetDTO {
@@ -81,8 +84,11 @@ export interface BetDTO {
   confidence: number | null;
   checklist: Checklist | null;
   overrideReason: string | null;
+  outsideV1: boolean;
   cancelledAt: number | null;
   cancelReason: string | null;
+  strategyVersion: string;
+  strategyRevision: number;
 }
 
 export interface BranchEventDTO {
@@ -115,6 +121,8 @@ export interface BankTransactionDTO {
   createdAt: number;
   type: BankTxType;
   harvestKind: HarvestKind | null;
+  status: BankStatus;
+  withdrawnAt: number | null;
   destination: BankDestination;
   notes: string | null;
 }
@@ -130,7 +138,7 @@ export type MilestoneDTO =
   | { kind: "NONE"; label: string; detail: string };
 
 export interface BranchDetailDTO {
-  branch: BranchSummaryDTO & { notes: string | null };
+  branch: BranchSummaryDTO & { notes: string | null; birthBetId: string | null };
   parent: Pick<BranchSummaryDTO, "id" | "code" | "profile" | "status"> | null;
   children: BranchSummaryDTO[];
   bets: BetDTO[];

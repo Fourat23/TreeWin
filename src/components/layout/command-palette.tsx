@@ -1,5 +1,6 @@
 "use client";
 
+import { withWorkspace } from "@/lib/workspace";
 import { Command } from "cmdk";
 import { Dialog as D } from "radix-ui";
 import {
@@ -41,7 +42,7 @@ export function CommandPalette({
 }) {
   const router = useRouter();
   const f = useFormat();
-  const { openNewTicket, openCreateBranch, openBranch } = useUi();
+  const { openNewTicket, openCreateBranch, openBranch, workspace } = useUi();
   const [branches, setBranches] = useState<PaletteBranch[]>([]);
 
   useEffect(() => {
@@ -58,12 +59,15 @@ export function CommandPalette({
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
-    fetch("/api/branches", { signal: controller.signal, cache: "no-store" })
+    fetch(withWorkspace("/api/branches", workspace), {
+      signal: controller.signal,
+      cache: "no-store",
+    })
       .then((r) => r.json() as Promise<PaletteBranch[]>)
       .then(setBranches)
       .catch(() => undefined);
     return () => controller.abort();
-  }, [open]);
+  }, [open, workspace]);
 
   const run = (fn: () => void) => {
     onOpenChange(false);
