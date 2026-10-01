@@ -5,7 +5,9 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   // Native SQLite driver must stay a plain Node require on the server.
   serverExternalPackages: ["better-sqlite3"],
-  devIndicators: { position: "bottom-right" },
+  devIndicators: false,
+  // Don't generate AGENTS.md / CLAUDE.md in the project on `next dev`.
+  agentRules: false,
 };
 
 export default nextConfig;

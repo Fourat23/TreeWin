@@ -252,7 +252,7 @@
 
 /* ---------- React Flow theming ---------- */
 
-.react-flow {
+.react-flow.react-flow {
   --xy-background-color: transparent;
   --xy-edge-stroke: var(--border-strong);
   --xy-edge-stroke-selected: var(--fg-muted);
@@ -264,6 +264,12 @@
   --xy-minimap-mask-background-color: color-mix(in oklab, var(--bg) 70%, transparent);
   --xy-node-boxshadow-selected: none;
   --xy-attribution-background-color: transparent;
+  --xy-minimap-node-stroke-color: transparent;
+  --xy-handle-background-color: transparent;
+}
+.react-flow__attribution a {
+  color: var(--fg-subtle);
+  font-size: 9px;
 }
 .react-flow__controls {
   border-radius: 0.6rem;

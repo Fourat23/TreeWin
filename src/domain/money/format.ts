@@ -46,7 +46,7 @@ export function formatMoney(cents: Cents, options: MoneyFormatOptions = {}): str
         style: "currency",
         currency,
         notation: compact ? "compact" : "standard",
-        minimumFractionDigits: digits,
+        minimumFractionDigits: compact ? 0 : digits,
         maximumFractionDigits: compact ? 1 : digits,
         signDisplay: signed ? "exceptZero" : "auto",
       }),
