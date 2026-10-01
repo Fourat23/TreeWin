@@ -4,7 +4,9 @@ import { suggestedStakeCents } from "@/domain/strategy/engine";
 import type { Workspace } from "@/domain/types";
 import { createEmptyState, findIntegrityProblems } from "../state/integrity";
 import type { WorkspaceState } from "../state/schema";
+import type { Profile } from "@/domain/types";
 import { createTicket, settleTicket } from "./bet-service";
+import { createRootBranch } from "./branch-service";
 import { DomainError } from "./errors";
 import type { OpContext } from "./internal";
 
@@ -75,4 +77,15 @@ export function expectDomainError(fn: () => unknown, code: DomainError["code"]):
     return error as DomainError;
   }
   throw new Error(`Expected DomainError ${code}`);
+}
+
+/**
+ * A REAL ledger funded the only allowed way — root A with the €100 seed — and played to P1, so
+ * a second REAL branch (A1) exists through a strategy split. A keeps 85.61 €, A1 has 100 €.
+ */
+export function realLedgerWithChild(profile: Profile = "BALANCED") {
+  const h = workspaceHarness("REAL");
+  const root = createRootBranch(h.state, { profile, capitalCents: 10_000 }, h.ctx());
+  for (let i = 0; i < 4; i += 1) h.play(root.id, 13_000, "WON");
+  return { h, a: h.branch("A"), a1: h.branch("A1") };
 }

@@ -132,21 +132,25 @@ describe("unarchive", () => {
   });
 
   it("refuses in REAL when a restored pending ticket would break one branch per match", () => {
+    // REAL tree grown by splits only: A → A1 (P1) → A2 (first HARVEST threshold).
     const h = workspaceHarness("REAL");
     const a = createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx());
-    const b = createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx());
+    while (h.branch("A").thresholdLevel < 1) h.play(a.id, 13_000, "WON");
+    const a1 = h.branch("A1");
+    const a2 = h.branch("A2");
     const match = { eventName: "PSG - Nantes", eventDate: "2026-10-04" };
-    createTicket(h.state, ticketInput(a.id, 10_000, 12_400, match), h.ctx());
+    createTicket(h.state, ticketInput(a2.id, a2.currentCapitalCents, 12_400, match), h.ctx());
     const { archiveId } = applyCorrection(
       h.state,
-      { target: { kind: "DELETE_BRANCH", branchId: a.id } },
+      { target: { kind: "DELETE_TICKET", betId: a2.birthBetId ?? "" } },
       h.ctx(),
     );
-    createTicket(h.state, ticketInput(b.id, 10_000, 12_400, match), h.ctx());
-    expectDomainError(
+    createTicket(h.state, ticketInput(a1.id, a1.currentCapitalCents, 12_400, match), h.ctx());
+    const error = expectDomainError(
       () => unarchiveEntry(h.state, { archiveId: archiveId ?? "" }, h.ctx()),
       "INVALID_STATE",
     );
+    expect(error.message).toMatch(/one branch per match/);
     expect(h.state.archive).toHaveLength(1);
   });
 

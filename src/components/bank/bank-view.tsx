@@ -196,6 +196,26 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
             </ul>
             <div className="border-t border-border pt-3">
               <p className="mb-2 text-[11px] font-medium tracking-wider text-fg-subtle uppercase">
+                Origin
+              </p>
+              <ul className="flex flex-col gap-1.5 text-sm" data-testid="bank-origin">
+                {data.byOrigin
+                  .filter((o) => o.count > 0)
+                  .map((o) => (
+                    <li key={o.origin} className="flex justify-between">
+                      <span className="text-fg-muted">
+                        {o.origin === "MANUAL"
+                          ? "Manual transfer"
+                          : `${HARVEST_LABEL[o.origin]} harvest`}
+                        <span className="ml-1.5 text-xs text-fg-subtle">{o.count}</span>
+                      </span>
+                      <span className="num">{f.money(o.amountCents)}</span>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+            <div className="border-t border-border pt-3">
+              <p className="mb-2 text-[11px] font-medium tracking-wider text-fg-subtle uppercase">
                 Destination
               </p>
               <ul className="flex flex-col gap-1.5 text-sm">

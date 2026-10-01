@@ -14,6 +14,7 @@ import {
   HARVEST_KINDS,
   PROFILES,
   PROTOCOL_STATUSES,
+  REAL_INITIAL_SEED_CENTS,
   TRISTATE_VALUES,
   WORKSPACES,
 } from "@/domain/types";
@@ -230,7 +231,75 @@ export const auditEntrySchema = z
   .strict();
 export const AUDIT_LOG_LIMIT = 500;
 
-export const workspaceStateSchema = z
+/**
+ * External funding of the ledger. In REAL it is consumed once, by the creation of the single
+ * €100 root; it is never unlocked again by deleting, archiving, correcting or killing that root.
+ * Only a Factory Reset (a brand-new ledger) starts with an unconsumed seed.
+ */
+export const initialFundingSchema = z
+  .object({
+    amountCents: int.positive(),
+    consumed: z.boolean(),
+    consumedAt: nullableMs,
+    rootBranchId: id.nullable(),
+  })
+  .strict();
+export type InitialFunding = z.infer<typeof initialFundingSchema>;
+
+export function freshInitialFunding(): InitialFunding {
+  return {
+    amountCents: REAL_INITIAL_SEED_CENTS,
+    consumed: false,
+    consumedAt: null,
+    rootBranchId: null,
+  };
+}
+
+const ROOT_CODE_RE = /^[A-Z]+$/;
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * Funding state implied by a ledger's history: consumed as soon as any root branch exists or
+ * ever existed (live, archived, or only remembered by its reserved code).
+ */
+export function deriveInitialFunding(raw: {
+  branches?: unknown;
+  archive?: unknown;
+  metadata?: unknown;
+}): InitialFunding {
+  const roots: Record<string, unknown>[] = [];
+  const collect = (list: unknown) => {
+    if (!Array.isArray(list)) return;
+    for (const b of list) if (isRecord(b) && b.parentId === null) roots.push(b);
+  };
+  collect(raw.branches);
+  if (Array.isArray(raw.archive)) for (const a of raw.archive) if (isRecord(a)) collect(a.branches);
+  const reserved =
+    isRecord(raw.metadata) && Array.isArray(raw.metadata.reservedCodes)
+      ? raw.metadata.reservedCodes.filter(
+          (c): c is string => typeof c === "string" && ROOT_CODE_RE.test(c),
+        )
+      : [];
+  if (roots.length === 0 && reserved.length === 0) return freshInitialFunding();
+  const first = roots
+    .filter((r) => typeof r.createdAt === "number" && typeof r.id === "string")
+    .sort((a, b) => (a.createdAt as number) - (b.createdAt as number))[0];
+  return {
+    amountCents: REAL_INITIAL_SEED_CENTS,
+    consumed: true,
+    consumedAt: first ? (first.createdAt as number) : null,
+    rootBranchId: first ? (first.id as string) : null,
+  };
+}
+
+/** Files written before `initialFunding` existed get it derived from their history. */
+function upgradeLegacyState(raw: unknown): unknown {
+  if (!isRecord(raw) || !isRecord(raw.metadata) || "initialFunding" in raw.metadata) return raw;
+  return { ...raw, metadata: { ...raw.metadata, initialFunding: deriveInitialFunding(raw) } };
+}
+
+const workspaceStateObjectSchema = z
   .object({
     format: z.literal(STATE_FORMAT),
     schemaVersion: z.literal(STATE_SCHEMA_VERSION),
@@ -261,10 +330,14 @@ export const workspaceStateSchema = z
          * corrected away or purged branches keep their code reserved forever.
          */
         reservedCodes: z.array(z.string().min(1).max(64)).default([]),
+        /** External funding of this ledger (REAL: the single €100 seed). */
+        initialFunding: initialFundingSchema,
       })
       .strict(),
   })
   .strict();
+
+export const workspaceStateSchema = z.preprocess(upgradeLegacyState, workspaceStateObjectSchema);
 
 export type WorkspaceState = z.infer<typeof workspaceStateSchema>;
 export type BranchRecord = z.infer<typeof branchRecordSchema>;
@@ -277,7 +350,12 @@ export type LastChange = z.infer<typeof lastChangeSchema>;
 export type AuditEntry = z.infer<typeof auditEntrySchema>;
 
 export const BACKUP_FORMAT = "celltree-backup";
-export const BACKUP_KINDS = ["AUTO", "MANUAL", "EXPORT"] as const;
+/**
+ * AUTO: rolling snapshot before each change (retention applies). MANUAL: user backup.
+ * EXPORT: downloaded export. RECOVERY: complete ledger saved before a Factory Reset.
+ * Only AUTO snapshots are ever deleted automatically.
+ */
+export const BACKUP_KINDS = ["AUTO", "MANUAL", "EXPORT", "RECOVERY"] as const;
 export type BackupKind = (typeof BACKUP_KINDS)[number];
 
 /**

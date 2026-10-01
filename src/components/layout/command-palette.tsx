@@ -42,7 +42,7 @@ export function CommandPalette({
 }) {
   const router = useRouter();
   const f = useFormat();
-  const { openNewTicket, openCreateBranch, openBranch, workspace } = useUi();
+  const { openNewTicket, openCreateBranch, openBranch, workspace, hints } = useUi();
   const [branches, setBranches] = useState<PaletteBranch[]>([]);
 
   useEffect(() => {
@@ -100,9 +100,11 @@ export function CommandPalette({
                 <Item icon={<Plus />} onSelect={() => run(() => openNewTicket())}>
                   New round / ticket
                 </Item>
-                <Item icon={<Sprout />} onSelect={() => run(openCreateBranch)}>
-                  Create root branch
-                </Item>
+                {hints.canCreateRoot ? (
+                  <Item icon={<Sprout />} onSelect={() => run(openCreateBranch)}>
+                    Create root branch
+                  </Item>
+                ) : null}
                 <Item icon={<FlaskConical />} onSelect={() => go("/simulation")}>
                   Run simulation
                 </Item>

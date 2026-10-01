@@ -4,6 +4,7 @@ export type DomainErrorCode =
   | "INVALID_STATE"
   | "PENDING_EXISTS"
   | "POLICY_VIOLATION"
+  | "FUNDING_LOCKED"
   | "IMPORT_REJECTED"
   | "WORKSPACE_MISMATCH"
   | "STATE_INVALID";

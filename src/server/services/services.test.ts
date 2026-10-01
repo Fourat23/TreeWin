@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { verifyLedger } from "@/domain/branches/metrics";
 import { DEFAULT_SETTINGS } from "@/domain/strategy/settings";
+import { getBankData } from "../queries/bank";
 import { getDashboard } from "../queries/overview";
 import { getTreeHistory, listBranchSummaries } from "../queries/branches";
 import { createEmptyState, findIntegrityProblems } from "../state/integrity";
@@ -27,7 +28,12 @@ import {
   transferToBank,
 } from "./branch-service";
 import { saveSettings } from "./settings-service";
-import { expectDomainError, ticketInput, workspaceHarness } from "./test-helpers";
+import {
+  expectDomainError,
+  realLedgerWithChild,
+  ticketInput,
+  workspaceHarness,
+} from "./test-helpers";
 
 describe("acceptance scenario (§71) — REAL workspace, V1 rules", () => {
   it("100 € → 130 → 169 → 219.70 → 285.61 ⇒ P1: BANK 100, child 100, mother 85.61; A1 dies", () => {
@@ -172,7 +178,8 @@ describe("V1 ticket policy", () => {
   });
 
   it("a MATURE branch stakes its capped principal", () => {
-    const h = workspaceHarness("REAL");
+    // A €2 000 root is only possible in DEMO; the stake rule checked here is identical in REAL.
+    const h = workspaceHarness("DEMO");
     const b = createRootBranch(h.state, { profile: "HARVEST", capitalCents: 200_000 }, h.ctx());
     h.play(b.id, 13_000, "WON"); // 2 600 € ≥ cap 2 500 € → MATURE, excess split
     expect(h.branch(b.code).status).toBe("MATURE");
@@ -209,10 +216,9 @@ describe("one branch per match", () => {
   const match = { eventName: "Real Madrid - Getafe", eventDate: "2026-10-04" };
 
   it("REAL blocks a second branch on the same pending match, without override", () => {
-    const h = workspaceHarness("REAL");
-    const a = createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx());
-    const b = createRootBranch(h.state, { profile: "GROWTH", capitalCents: 10_000 }, h.ctx());
-    createTicket(h.state, ticketInput(a.id, 10_000, 12_400, match), h.ctx());
+    // In REAL the second branch comes from a strategy split (A → A1), never a second root.
+    const { h, a, a1: b } = realLedgerWithChild();
+    createTicket(h.state, ticketInput(a.id, 8_561, 12_400, match), h.ctx());
     expect(
       checkTicketConflicts(h.state, { ...match, branchId: b.id }, new Date()).sameEvent.map(
         (c) => c.branchCode,
@@ -252,7 +258,7 @@ describe("one branch per match", () => {
   });
 
   it("only warns when the policy is WARN; limits are overridable personal preferences", () => {
-    const h = workspaceHarness("REAL");
+    const h = workspaceHarness("DEMO"); // three manual roots: DEMO only (same policy otherwise)
     saveSettings(
       h.state,
       {
@@ -366,8 +372,8 @@ describe("ticket workflow", () => {
 });
 
 describe("branches", () => {
-  it("names roots A, B, C and snapshots the profile cap", () => {
-    const h = workspaceHarness("REAL");
+  it("names roots A, B, C and snapshots the profile cap (DEMO allows several roots)", () => {
+    const h = workspaceHarness("DEMO");
     const codes = (["HARVEST", "BALANCED", "GROWTH"] as const).map(
       (profile) => createRootBranch(h.state, { profile, capitalCents: 10_000 }, h.ctx()).code,
     );
@@ -435,9 +441,9 @@ describe("branches", () => {
       h.ctx(),
     );
     expect(strategyChanged).toBe(true);
-    const b = createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx());
+    const { bet } = createTicket(h.state, ticketInput(h.branch("A").id, 10_000, 12_400), h.ctx());
     expect(h.branch("A").strategyRevision).toBe(0);
-    expect(b.strategyRevision).toBe(1);
+    expect(bet.strategyRevision).toBe(1);
     expect(h.state.settingsHistory).toHaveLength(1);
     // Display-only changes do not bump the revision.
     expect(
@@ -498,6 +504,29 @@ describe("BANK statuses", () => {
     expect(findIntegrityProblems(inconsistent, "REAL").join(" ")).toMatch(
       /inconsistent withdrawal/,
     );
+  });
+});
+
+describe("BANK origin", () => {
+  it("keeps manual transfers apart from P1 / threshold / mature-profit harvests", () => {
+    const { h, a } = realLedgerWithChild();
+    transferToBank(
+      h.state,
+      { branchId: a.id, amountCents: 500, reason: "secure some profit" },
+      h.ctx(),
+    );
+    const origins = Object.fromEntries(
+      getBankData(h.state, {}).byOrigin.map((o) => [o.origin, [o.count, o.amountCents]]),
+    );
+    expect(origins).toEqual({
+      P1: [1, 10_000],
+      THRESHOLD: [0, 0],
+      MATURE_PROFIT: [0, 0],
+      MANUAL: [1, 500],
+    });
+    const manual = h.state.bankTransactions.find((t) => t.type === "MANUAL");
+    expect(manual).toMatchObject({ harvestKind: null, notes: "secure some profit" });
+    expect(h.events(a.id).at(-1)?.metadata).toMatchObject({ kind: "MANUAL" });
   });
 });
 

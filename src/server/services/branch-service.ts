@@ -46,9 +46,22 @@ export function reserveBranchCode(state: WorkspaceState, code: string): void {
   state.metadata.reservedCodes.push(code);
 }
 
+export const FUNDING_LOCKED_MESSAGE =
+  "REAL external funding is already locked. CELLTREE receives external capital only once. New branches must now be created by strategy splits.";
+
+/** Whether a manual root branch may be created in this workspace right now. */
+export function canCreateRootBranch(state: WorkspaceState): boolean {
+  return state.workspace === "DEMO" || !state.metadata.initialFunding.consumed;
+}
+
 /**
- * Create a new root branch (A, B, C…). This is the only way external money enters the
- * ecosystem; BANK money can never be used here.
+ * Create a root branch. This is the only way external money enters the ecosystem; BANK money
+ * can never be used here.
+ *
+ * REAL: external capital enters exactly once — a single root funded with exactly the €100 seed
+ * (root A of a fresh ledger). That consumes the ledger's funding for good: deleting, archiving,
+ * correcting or killing the root never unlocks it (only a Factory Reset starts a new ledger).
+ * DEMO: any number of roots, any amount (experiments).
  */
 export function createRootBranch(
   state: WorkspaceState,
@@ -58,6 +71,17 @@ export function createRootBranch(
   const data = parseInput(createRootBranchSchema, input);
   const fmt = moneyFormatter(state.settings);
   const now = ctx.now.getTime();
+  const real = ctx.workspace === "REAL";
+  if (real) {
+    const funding = state.metadata.initialFunding;
+    if (funding.consumed) throw new DomainError("FUNDING_LOCKED", FUNDING_LOCKED_MESSAGE);
+    if (data.capitalCents !== funding.amountCents) {
+      throw new DomainError(
+        "VALIDATION",
+        `The REAL root is funded with exactly ${fmt(funding.amountCents)} of external seed capital (fixed by REAL V1)`,
+      );
+    }
+  }
   const code = nextRootCode([...reservedBranchCodes(state)]);
   const capCents = state.settings.profiles[data.profile].capCents;
   const branch: BranchRecord = {
@@ -94,6 +118,14 @@ export function createRootBranch(
   };
   reserveBranchCode(state, code);
   state.branches.push(branch);
+  if (real) {
+    state.metadata.initialFunding = {
+      ...state.metadata.initialFunding,
+      consumed: true,
+      consumedAt: now,
+      rootBranchId: branch.id,
+    };
+  }
   branch.birthEventId = pushEvent(state, {
     branchId: branch.id,
     type: "BIRTH",
@@ -104,8 +136,16 @@ export function createRootBranch(
     statusAfter: "ACTIVE",
     relatedBetId: null,
     relatedBranchId: null,
-    description: `Root branch ${code} created with ${fmt(data.capitalCents)} (${data.profile.toLowerCase()})`,
-    metadata: { reason: "ROOT", profile: data.profile, capCents, p1Done: branch.p1Done },
+    description: `Root branch ${code} created with ${fmt(data.capitalCents)} (${data.profile.toLowerCase()})${
+      real ? " — the single REAL external seed; external funding is now locked" : ""
+    }`,
+    metadata: {
+      reason: "ROOT",
+      profile: data.profile,
+      capCents,
+      p1Done: branch.p1Done,
+      externalSeed: real,
+    },
   });
   return branch;
 }
@@ -263,8 +303,9 @@ export function adjustBranchCapital(
     statusAfter: branch.status,
     relatedBetId: null,
     relatedBranchId: null,
-    description: `Manual adjustment ${fmt(data.deltaCents, true)} — ${data.reason}`,
-    metadata: { kind: "CAPITAL_CORRECTION", reason: data.reason },
+    description: `Manual capital correction ${fmt(data.deltaCents, true)} (not funding) — ${data.reason}`,
+    // A correction of recorded history, never a funding event: initialFunding is untouched.
+    metadata: { kind: "CAPITAL_CORRECTION", reason: data.reason, funding: false },
   });
   return branch;
 }

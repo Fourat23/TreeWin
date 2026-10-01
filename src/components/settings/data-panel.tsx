@@ -31,7 +31,7 @@ import {
   initializeDemoAction,
   previewImportAction,
   resetDemoAction,
-  resetRealAction,
+  factoryResetRealAction,
   restoreBackupAction,
   restorePreviousSnapshotAction,
 } from "@/server/actions/workspace-actions";
@@ -92,6 +92,7 @@ export function DataPanel({
   const [confirmation, setConfirmation] = useState("");
   const [danger, setDanger] = useState<Danger | null>(null);
   const [typed, setTyped] = useState("");
+  const [acknowledged, setAcknowledged] = useState(false);
 
   const run = <T,>(
     action: () => Promise<{ ok: true; data: T } | { ok: false; message: string }>,
@@ -140,7 +141,7 @@ export function DataPanel({
 
   const dangerTitle =
     danger === "reset-real"
-      ? "Reset the REAL workspace?"
+      ? "Factory Reset REAL?"
       : danger === "reset-demo"
         ? "Reset DEMO data?"
         : danger === "init-demo"
@@ -163,8 +164,11 @@ export function DataPanel({
     if (!danger) return;
     if (danger === "reset-real")
       run(
-        () => resetRealAction(workspace, typed),
-        () => "REAL workspace reset (snapshot kept)",
+        () => factoryResetRealAction(workspace, typed),
+        (r) =>
+          r.recoveryBackupId
+            ? `New REAL ledger started — previous ledger saved as ${r.recoveryBackupId}`
+            : "New REAL ledger started",
       );
     else if (danger === "reset-demo")
       run(
@@ -277,7 +281,13 @@ export function DataPanel({
                     <span className="flex items-center gap-2">
                       <Badge
                         tone={
-                          b.kind === "MANUAL" ? "info" : b.kind === "EXPORT" ? "mature" : "neutral"
+                          b.kind === "MANUAL"
+                            ? "info"
+                            : b.kind === "EXPORT"
+                              ? "mature"
+                              : b.kind === "RECOVERY"
+                                ? "warning"
+                                : "neutral"
                         }
                       >
                         {b.kind}
@@ -544,11 +554,11 @@ export function DataPanel({
         <Card className="border-critical/30">
           <CardHeader
             title="Danger zone"
-            description="Deletes every REAL branch, ticket, BANK entry and candidate. Settings are kept; a snapshot is taken first."
+            description="Factory Reset REAL ends this ledger and starts a brand-new one (root A, single €100 seed). The complete current ledger is saved first as a recovery snapshot."
           />
           <CardBody>
             <Button variant="danger" onClick={() => setDanger("reset-real")}>
-              <Trash2 /> Reset REAL workspace…
+              <Trash2 /> Factory Reset REAL…
             </Button>
           </CardBody>
         </Card>
@@ -560,6 +570,7 @@ export function DataPanel({
           if (!o) {
             setDanger(null);
             setTyped("");
+            setAcknowledged(false);
           }
         }}
         title={dangerTitle}
@@ -572,7 +583,12 @@ export function DataPanel({
             <Button
               variant={danger === "init-demo" ? "primary" : "danger"}
               onClick={confirmDanger}
-              disabled={pending || (typedRequired !== null && typed.trim() !== typedRequired)}
+              disabled={
+                pending ||
+                (danger === "reset-real"
+                  ? typed !== typedRequired || !acknowledged
+                  : typedRequired !== null && typed.trim() !== typedRequired)
+              }
               data-testid="confirm-danger"
             >
               Confirm
@@ -582,10 +598,33 @@ export function DataPanel({
       >
         <div className="flex flex-col gap-3 text-sm text-fg-muted">
           {danger === "reset-real" ? (
-            <p>
-              Every REAL record is deleted. The current state is saved as a snapshot first, so this
-              can be undone.
-            </p>
+            <div className="flex flex-col gap-2 rounded-lg border border-critical/40 bg-critical/8 p-3 text-critical">
+              <p className="font-semibold">
+                Factory Reset REAL starts a brand-new CELLTREE ledger.
+              </p>
+              <p>
+                All REAL branches, tickets, BANK history, events, archives and branch-code history
+                will be cleared.
+              </p>
+              <p>
+                Your next experiment will start again with root A and a single €100 external seed.
+              </p>
+              <p>
+                A recovery snapshot of the current ledger will be created first (kept in the backup
+                history, never deleted automatically).
+              </p>
+              <p className="font-semibold">Type RESET REAL to continue.</p>
+              <label className="mt-1 flex items-start gap-2 text-fg">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={acknowledged}
+                  onChange={(e) => setAcknowledged(e.target.checked)}
+                  data-testid="factory-reset-ack"
+                />
+                I understand that the entire REAL ledger is replaced by a new, empty one.
+              </label>
+            </div>
           ) : danger === "reset-demo" ? (
             <p>
               data/demo/state.json is recreated with fresh demonstration data. Nothing in REAL

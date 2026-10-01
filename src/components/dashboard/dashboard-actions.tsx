@@ -5,12 +5,14 @@ import { useUi } from "@/components/providers/ui-provider";
 import { Button } from "@/components/ui/button";
 
 export function DashboardActions() {
-  const { openNewTicket, openCreateBranch } = useUi();
+  const { openNewTicket, openCreateBranch, hints } = useUi();
   return (
     <div className="hidden gap-2 lg:flex">
-      <Button onClick={openCreateBranch}>
-        <Sprout /> Create branch
-      </Button>
+      {hints.canCreateRoot ? (
+        <Button onClick={openCreateBranch}>
+          <Sprout /> Create branch
+        </Button>
+      ) : null}
       <Button variant="primary" onClick={() => openNewTicket()}>
         <Plus /> New round
       </Button>

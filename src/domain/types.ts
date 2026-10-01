@@ -1,6 +1,6 @@
 /**
- * Core enumerations shared by the domain, the database schema and the UI.
- * Declared as const tuples so they can feed both TypeScript types and Zod/Drizzle enums.
+ * Core enumerations shared by the domain, the workspace state schema and the UI.
+ * Declared as const tuples so they can feed both TypeScript types and Zod enums.
  */
 
 /**
@@ -9,6 +9,12 @@
  */
 export const WORKSPACES = ["REAL", "DEMO"] as const;
 export type Workspace = (typeof WORKSPACES)[number];
+
+/**
+ * REAL funding rule: a REAL ledger receives external capital exactly once — a single €100 seed
+ * that creates root A. Every later branch comes from strategy splits; BANK never funds branches.
+ */
+export const REAL_INITIAL_SEED_CENTS = 10_000;
 
 export const PROFILES = ["HARVEST", "BALANCED", "GROWTH"] as const;
 export type Profile = (typeof PROFILES)[number];

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import type { SameEventPolicy } from "@/domain/strategy/settings";
 import type { Profile, ProfileRecord, Workspace } from "@/domain/types";
@@ -19,6 +20,13 @@ export interface StrategyHints {
   defaultProfile: Profile;
   corridors: ProfileRecord<{ minBp: number; maxBp: number }>;
   strategyVersion: string;
+  /**
+   * Whether a manual root may be created now. REAL: only until its single €100 external seed is
+   * consumed (the server enforces it too). DEMO: always.
+   */
+  canCreateRoot: boolean;
+  /** Fixed REAL seed (cents). */
+  realSeedCents: number;
 }
 
 /** Last undoable change of the displayed workspace. */
@@ -53,6 +61,9 @@ interface UiContextValue {
 }
 
 const UiContext = createContext<UiContextValue | null>(null);
+
+export const FUNDING_LOCKED_TEXT =
+  "REAL external funding is already locked. CELLTREE receives external capital only once. New branches must now be created by strategy splits.";
 
 export function UiProvider({
   workspace,
@@ -94,7 +105,10 @@ export function UiProvider({
       closeBranch: () => setSelectedBranch(null),
       openNewTicket: (request) => setNewTicket(request ?? {}),
       openSettle: (betId) => setSettleBetId(betId),
-      openCreateBranch: () => setCreateBranchOpen(true),
+      openCreateBranch: () => {
+        if (hints.canCreateRoot) setCreateBranchOpen(true);
+        else toast.error(FUNDING_LOCKED_TEXT);
+      },
       openPalette: () => setPaletteOpen(true),
       openCorrection: (target, options) => setCorrection({ target, onDone: options?.onDone }),
     }),

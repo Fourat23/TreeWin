@@ -241,7 +241,7 @@ describe("delete semantics", () => {
     expect(findIntegrityProblems(h.state, "REAL")).toEqual([]);
   });
 
-  it("archives a root subtree by default; archived root codes are never reused", () => {
+  it("archives a root subtree by default; it never unlocks REAL external funding", () => {
     const { h, a } = grownTree();
     const result = applyCorrection(
       h.state,
@@ -251,9 +251,12 @@ describe("delete semantics", () => {
     expect(result.removedBranches).toBe(2);
     expect(h.state.branches).toHaveLength(0);
     expect(h.state.archive[0]?.branches.map((b) => b.code).sort()).toEqual(["A", "A1"]);
-    expect(
-      createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx()).code,
-    ).toBe("B");
+    // The REAL ledger already consumed its single €100 seed: no new root, even with A archived.
+    expectDomainError(
+      () => createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx()),
+      "FUNDING_LOCKED",
+    );
+    expect(h.state.metadata.initialFunding).toMatchObject({ consumed: true, rootBranchId: a.id });
     expectDomainError(
       () => purgeArchiveEntry(h.state, { archiveId: result.archiveId ?? "", confirmation: "nope" }),
       "VALIDATION",

@@ -25,9 +25,10 @@ import { getProfileRules, type StrategySettings } from "./settings";
  *
  * `evaluateSettlement` turns (branch state, ticket, result, settings) into a complete plan:
  * new capital, status, counters, BANK transfers, children to create and the events that
- * explain every cent. It performs no I/O — persistence happens afterwards, in one DB
- * transaction, by applying the plan verbatim. The same engine powers the settlement
- * preview and the Monte Carlo simulation.
+ * explain every cent. It performs no I/O — the plan is then applied verbatim to a copy of the
+ * workspace state and persisted atomically through the workspace state repository (validated
+ * JSON file, all or nothing). The same engine powers the settlement preview and the Monte Carlo
+ * simulation.
  *
  * Win evaluation order:
  *   1. capital = capital − stake + stake × odds (real ticket odds, cent-rounded)

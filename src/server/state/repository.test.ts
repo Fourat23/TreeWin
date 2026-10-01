@@ -115,7 +115,7 @@ describe("workspaces", () => {
 describe("atomic persistence", () => {
   it("writes valid, versioned JSON through a temporary file", async () => {
     await repo.mutate("REAL", (s, ctx) =>
-      createRootBranch(s, { profile: "GROWTH", capitalCents: 5_000 }, ctx),
+      createRootBranch(s, { profile: "GROWTH", capitalCents: 10_000 }, ctx),
     );
     const raw = JSON.parse(await read(repo.paths("REAL").state));
     expect(raw).toMatchObject({
@@ -129,7 +129,7 @@ describe("atomic persistence", () => {
 
   it("an invalid change never replaces state.json (and leaves no snapshot)", async () => {
     await repo.mutate("REAL", (s, ctx) =>
-      createRootBranch(s, { profile: "GROWTH", capitalCents: 5_000 }, ctx),
+      createRootBranch(s, { profile: "GROWTH", capitalCents: 10_000 }, ctx),
     );
     const before = await read(repo.paths("REAL").state);
     const backupsBefore = await repo.listBackups("REAL");
@@ -148,12 +148,12 @@ describe("atomic persistence", () => {
 
   it("a throwing operation leaves the state untouched", async () => {
     await repo.mutate("REAL", (s, ctx) =>
-      createRootBranch(s, { profile: "GROWTH", capitalCents: 5_000 }, ctx),
+      createRootBranch(s, { profile: "GROWTH", capitalCents: 10_000 }, ctx),
     );
     const before = await read(repo.paths("REAL").state);
     await expect(
       repo.mutate("REAL", (s, ctx) => {
-        createRootBranch(s, { profile: "GROWTH", capitalCents: 5_000 }, ctx);
+        updateBranchNotes(s, { branchId: s.branches[0]?.id ?? "", notes: "lost" }, ctx);
         throw new Error("boom");
       }),
     ).rejects.toThrow("boom");
@@ -163,12 +163,12 @@ describe("atomic persistence", () => {
   it("serialises concurrent mutations of a workspace", async () => {
     await Promise.all(
       Array.from({ length: 5 }, () =>
-        repo.mutate("REAL", (s, ctx) =>
+        repo.mutate("DEMO", (s, ctx) =>
           createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx),
         ),
       ),
     );
-    expect((await repo.load("REAL")).branches.map((b) => b.code)).toEqual([
+    expect((await repo.load("DEMO")).branches.map((b) => b.code)).toEqual([
       "A",
       "B",
       "C",
@@ -190,7 +190,7 @@ describe("snapshots, restore & undo", () => {
   const addRoot = (label: string) =>
     repo.mutate(
       "REAL",
-      (s, ctx) => createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx),
+      (s, ctx) => createRootBranch(s, { profile: "HARVEST", capitalCents: 10_000 }, ctx),
       {
         label,
       },
@@ -217,12 +217,23 @@ describe("snapshots, restore & undo", () => {
 
   it("Undo after a major change then a small edit only reverts the small edit", async () => {
     await addRoot("Created A");
-    await addRoot("Created B"); // major mutation A
+    await repo.mutate(
+      "REAL",
+      (s, ctx) =>
+        transferToBank(
+          s,
+          { branchId: s.branches[0]?.id ?? "", amountCents: 2_000, reason: "secure" },
+          ctx,
+        ),
+      { label: "Secured 20 € to BANK" },
+    ); // major mutation A
     await editNotes("typo"); // small edit B
     expect(await repo.undo("REAL")).toBe("Edited notes: typo");
-    expect(await codes()).toEqual(["A", "B"]); // B's creation is kept
-    expect(await notes()).toEqual([null, null]); // only the note edit is gone
-    expect((await repo.load("REAL")).metadata.lastChange?.label).toBe("Created B");
+    const state = await repo.load("REAL");
+    expect(state.bankTransactions).toHaveLength(1); // the major change is kept
+    expect(state.branches[0]?.currentCapitalCents).toBe(8_000);
+    expect(await notes()).toEqual([null]); // only the note edit is gone
+    expect(state.metadata.lastChange?.label).toBe("Secured 20 € to BANK");
   });
 
   it("repeated Undo reverses one mutation at a time", async () => {
@@ -353,7 +364,7 @@ describe("snapshots, restore & undo", () => {
       "REAL",
       (s, ctx) => {
         s.settings = { ...DEFAULT_SETTINGS, backups: { keepAutomatic: 3 } };
-        createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx);
+        createRootBranch(s, { profile: "HARVEST", capitalCents: 10_000 }, ctx);
       },
       { label: "setup" },
     );
@@ -362,7 +373,8 @@ describe("snapshots, restore & undo", () => {
     for (let i = 0; i < 6; i += 1) {
       await repo.mutate(
         "REAL",
-        (s, ctx) => createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx),
+        (s, ctx) =>
+          updateBranchNotes(s, { branchId: s.branches[0]?.id ?? "", notes: `note ${i}` }, ctx),
         { label: `change ${i}`, now: new Date((t += 1_000)) },
       );
     }

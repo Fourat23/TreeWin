@@ -67,6 +67,8 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
                 sameEventPolicy: settings.sameEventPolicy,
                 defaultProfile: "BALANCED",
                 strategyVersion: settings.strategyVersion,
+                canCreateRoot: workspace === "DEMO" || !state.metadata.initialFunding.consumed,
+                realSeedCents: state.metadata.initialFunding.amountCents,
                 corridors: {
                   HARVEST: {
                     minBp: settings.profiles.HARVEST.oddsTargetMinBp,

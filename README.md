@@ -44,6 +44,9 @@ sans jamais disparaître de l'historique.
 - **Plus de base de données.** SQLite, better-sqlite3, Drizzle et les migrations ont disparu. Chaque espace de
   travail est un **fichier JSON versionné et validé** (`data/<workspace>/state.json`), écrit de façon
   **atomique** (fichier temporaire → fsync → renommage) à travers une file de mutations.
+- **REAL reçoit du capital externe une seule fois** : une unique racine `A` financée par exactement **100 €**,
+  puis le financement externe est **verrouillé** pour toute la vie du ledger ; toutes les branches suivantes
+  naissent des splits de la stratégie. Recommencer avec un nouveau 100 € exige une **Factory Reset REAL**.
 - **Deux espaces isolés : REAL et DEMO.** REAL démarre vide et n'est jamais pré-rempli ; DEMO contient le jeu de
   démonstration et peut être réinitialisé à volonté. Un sélecteur permanent, un badge `REAL DATA` et un bandeau
   `DEMO / SIMULATION DATA` indiquent en permanence quelles données sont affichées.
@@ -98,13 +101,14 @@ réinitialisation de DEMO se font depuis l'interface, et REAL n'est jamais pré-
 
 ## Espaces de travail REAL et DEMO
 
-|                     | REAL                                                    | DEMO                                                           |
-| ------------------- | ------------------------------------------------------- | -------------------------------------------------------------- |
-| Fichier             | `data/real/state.json` + `data/real/backups/`           | `data/demo/state.json` + `data/demo/backups/`                  |
-| Contenu initial     | **vide** (jamais de données de démo)                    | vide, puis **Initialize demo data**                            |
-| Règles V1           | **strictes** (aucun contournement)                      | mêmes règles, contournement explicite et journalisé possible   |
-| Actions spécifiques | **Reset REAL workspace** (taper `RESET REAL`, snapshot) | **Initialize demo data**, **Reset DEMO** (recrée le seul DEMO) |
-| Indicateur          | badge vert `REAL DATA`                                  | badge `DEMO DATA` + bandeau `DEMO / SIMULATION DATA`           |
+|                     | REAL                                                   | DEMO                                                           |
+| ------------------- | ------------------------------------------------------ | -------------------------------------------------------------- |
+| Fichier             | `data/real/state.json` + `data/real/backups/`          | `data/demo/state.json` + `data/demo/backups/`                  |
+| Contenu initial     | **vide** (jamais de données de démo)                   | vide, puis **Initialize demo data**                            |
+| Racines manuelles   | **une seule** : `A`, exactement **100 €**, puis verrou | autant que voulu, montant libre                                |
+| Règles V1           | **strictes** (aucun contournement)                     | mêmes règles, contournement explicite et journalisé possible   |
+| Actions spécifiques | **Factory Reset REAL** (`RESET REAL` + confirmation)   | **Initialize demo data**, **Reset DEMO** (recrée le seul DEMO) |
+| Indicateur          | badge vert `REAL DATA`                                 | badge `DEMO DATA` + bandeau `DEMO / SIMULATION DATA`           |
 
 - Le choix de l'espace affiché est une **préférence d'interface** (cookie `celltree-workspace`). Changer d'espace
   ne lit ni n'écrit aucune donnée : il n'existe pas de « workspace courant » global côté serveur.
@@ -113,6 +117,39 @@ réinitialisation de DEMO se font depuis l'interface, et REAL n'est jamais pré-
 - Un fichier appartenant à l'autre espace est refusé au chargement ; un état REAL portant le marqueur de démo est
   refusé à l'écriture ; aucun bouton ne charge la démo dans REAL ; un fichier DEMO ne peut pas être importé dans
   REAL.
+
+### Financement externe REAL : une seule fois
+
+Règle fondamentale de l'expérience : un ledger REAL démarre avec **exactement 100 €** de capital externe, qui
+n'entre dans l'écosystème **qu'une seule fois**.
+
+- `metadata.initialFunding = { amountCents: 10000, consumed, consumedAt, rootBranchId }` est stocké
+  explicitement et validé. Ledger neuf : `consumed: false`. La création de la racine (code `A` dans un ledger neuf,
+  profil au choix, montant **fixé** à 100,00 € dans l'interface) passe `consumed` à `true` avec la date et l'UUID
+  de `A`.
+- Ensuite, **aucune autre racine REAL** n'est possible, quel que soit le montant : le service refuse
+  (`FUNDING_LOCKED` — « REAL external funding is already locked. CELLTREE receives external capital only once.
+  New branches must now be created by strategy splits. ») et l'interface masque toutes les entrées « Create root
+  branch » (dashboard desktop et mobile, page Branches, palette de commandes, états vides).
+- Supprimer, archiver, purger, corriger ou tuer `A` ne **déverrouille jamais** le financement : le verrou
+  appartient au ledger, pas à la visibilité de la branche. Toutes les branches suivantes viennent des splits ; la
+  BANK ne finance jamais une branche. Si tout l'arbre meurt, ce ledger REAL est terminé (le dashboard l'indique).
+- Un **ajustement manuel positif** du capital est une **correction** d'historique (raison obligatoire, journalisé,
+  annulable), jamais un financement : il ne modifie pas `initialFunding`.
+- Le transfert manuel « Secure to BANK » reste une entrée BANK de type `MANUAL` (raison obligatoire), distincte
+  des récoltes P1 / THRESHOLD / MATURE_PROFIT (page BANK → _Origin_, export CSV).
+- **DEMO** n'est pas concerné : plusieurs racines, montants libres, expériences.
+
+### Factory Reset REAL
+
+_Settings → Danger zone → Factory Reset REAL_ termine le ledger REAL et en démarre un **nouveau** : branches,
+tickets, candidats, BANK, événements, archives, journal des changements, registre des codes et état du
+financement sont effacés ; la prochaine racine est donc `A` avec un nouveau seed de 100 € (les réglages de
+stratégie sont conservés comme configuration). Protections : avertissement explicite, saisie exacte de
+`RESET REAL`, case de confirmation, et **snapshot de récupération** (`…-recovery.json`, type `RECOVERY`) du ledger
+complet, écrit avant le reset et **jamais supprimé par la rétention**. Restaurer ce snapshot rend l'ancien ledger
+à l'identique (branches, BANK, tickets, archive, verrou de financement, registre des codes, généalogie,
+historique de stratégie) ; un Undo immédiat le permet aussi. DEMO n'est jamais touché.
 
 ## Stockage : fichiers JSON validés
 
@@ -131,7 +168,8 @@ Format (`src/server/state/schema.ts`) :
   "archive": [ … ],             // enregistrements retirés par une correction (mode archive)
   "auditLog": [ … ],            // journal des changements (500 derniers)
   "metadata": { "createdAt", "nextEventId", "strategyRevision", "mutationCount", "demoSeed", "lastChange",
-                "reservedCodes" } // tous les codes de branche déjà attribués (pierres tombales comprises)
+                "reservedCodes",   // tous les codes de branche déjà attribués (pierres tombales comprises)
+                "initialFunding" } // seed externe unique du ledger : { amountCents, consumed, consumedAt, rootBranchId }
 }
 ```
 
@@ -163,7 +201,8 @@ déplacé à côté, jamais supprimé).
   corrections, suppressions, archivage/désarchivage, notes, candidats, profil, ajustements, statut/date/destination
   BANK, réglages, import, resets, restaurations. Seuls les **50 plus récents** sont conservés (réglable :
   _Settings → Automatic snapshots kept_).
-- **Sauvegardes manuelles** (`…-manual.json`, avec note) : **jamais supprimées** par la rétention.
+- **Sauvegardes manuelles** (`…-manual.json`, avec note) et **snapshots de récupération** de Factory Reset
+  (`…-recovery.json`) : **jamais supprimés** par la rétention.
 - **Settings → Backups & snapshots** : historique (type, raison, date, taille), restauration de n'importe quel
   snapshot, **Restore previous snapshot**. Une restauration prend d'abord un snapshot de l'état courant : elle
   est elle-même annulable.
@@ -241,7 +280,8 @@ mère 85,61 €.
   refusée) et destination optionnelle → **WITHDRAWN** avec `withdrawnAt`. **Date** corrige la date d'une entrée
   retirée ; **Undo withdrawn** corrige une erreur ; **Set destination** (Livret A, PEA, CTO, autre — informatif).
   Chacune de ces actions est journalisée et annulable.
-- Le dashboard et la page BANK affichent **TOTAL SECURED**, **WITHDRAWN** et **AWAITING WITHDRAWAL**.
+- Le dashboard et la page BANK affichent **TOTAL SECURED**, **WITHDRAWN** et **AWAITING WITHDRAWAL** ; la page BANK
+  ventile aussi par **origine** : récolte P1, palier, profit mature, ou transfert **manuel**.
 - Aucune opération ne débite la BANK vers une branche ; ces statuts ne touchent jamais au capital des branches.
 
 ## Corrections et suppressions
@@ -278,7 +318,8 @@ Racines `A`, `B`, … `Z`, `AA` ; enfants `A1`, `A2` ; puis `A1.1`, `A1.2`. Un c
 vie** : le registre `metadata.reservedCodes` garde chaque code, y compris ceux des branches archivées, retirées
 par une correction ou purgées définitivement. Avec `A1` et `A2`, si `A1` disparaît, le prochain enfant de `A`
 est `A3`, jamais `A1` ; avec `A2.1` et `A2.2`, si `A2.1` disparaît, le suivant est `A2.3`. Les UUID restent les
-identifiants internes. Le registre est conservé par un reset de REAL et fusionné lors d'un import.
+identifiants internes. Les codes ne sont jamais réutilisés **au sein d'un même ledger** ; seule une **Factory Reset
+REAL** (nouveau ledger) ouvre un nouvel espace de noms, et un import remplace le ledger avec son propre registre.
 
 ## Versionnement de la stratégie
 
@@ -297,6 +338,10 @@ identifiants internes. Le registre est conservé par un reset de REAL et fusionn
 - **Migration V1.0** : un export JSON de l'ancienne version SQLite est reconnu et converti (statut BANK
   `SECURED`, stratégie 1.0, réglages remis aux défauts V1.1). Un export contenant le jeu de démo est traité comme
   DEMO. Aucune dépendance SQLite n'est nécessaire.
+- **Fichiers sans `initialFunding`** (V1.1 antérieur, exports V1.0) : le champ est déduit au chargement — financement
+  consommé dès qu'une racine existe ou a existé (y compris seulement dans le registre des codes), sinon seed
+  disponible. Un historique REAL à plusieurs racines reste lisible tel quel, mais aucune racine ne peut être
+  ajoutée.
 - **CSV** : tickets, branches, BANK (avec statut et date de retrait), par espace.
 
 ## Fonctionnalités
@@ -368,7 +413,7 @@ application du plan sur la copie → persistance tout-ou-rien.
 npm run test
 ```
 
-197 tests (unitaires, services sur état en mémoire, dépôt de fichiers sur dossier temporaire, composants) :
+217 tests (unitaires, services sur état en mémoire, dépôt de fichiers sur dossier temporaire, composants) :
 
 - arithmétique monétaire exacte ; **P1 à 2,80 × S** ; acceptation 100 → 130 → 169 → 219,70 → 285,61 ⇒ BANK 100,
   enfant 100, mère 85,61 ; mort après perte totale ; un seul jalon par round ;
@@ -382,9 +427,17 @@ npm run test
   Undo après « changement majeur puis petite édition » n'annule que la petite édition, Undo répétés un par un,
   isolation REAL/DEMO de l'Undo ;
 - **codes jamais réutilisés** après archivage, correction, réouverture, purge (racines et enfants imbriqués) ;
+- **financement externe REAL unique** : état neuf non consommé, première racine A à 100 € exactement, 99 € /
+  101 € refusés, seconde racine refusée (y compris après mort, archivage, purge ou correction de A), ajustement
+  manuel sans effet sur le financement, DEMO multi-racines sans consommer REAL, dérivation sur les anciens
+  fichiers et imports ;
+- **Factory Reset REAL** : confirmation exacte « RESET REAL », snapshot RECOVERY qui survit à la rétention,
+  ledger vide (codes et financement remis à zéro, racine suivante A à 100 €), DEMO intact, restauration du
+  ledger précédent à l'identique (verrou de financement et registre des codes compris), Undo immédiat ;
 - **Unarchive** (sous-arbre racine, correction « delete from here », lien candidat, candidat) et refus sûrs en
   cas de conflit ; date de retrait (aujourd'hui, passée, future refusée, correction, undo withdrawn) ;
-- BANK SECURED ↔ WITHDRAWN sans effet sur les branches, montants négatifs rejetés ;
+- BANK SECURED ↔ WITHDRAWN sans effet sur les branches, montants négatifs rejetés, origine des transferts
+  (P1 / seuil / profit mature / manuel) ;
 - corrections en cascade (reopen, delete from here, événement manuel, racine), absence d'orphelins et de BANK
   fantôme, archive vs purge et confirmations tapées ;
 - import/export (DEMO → REAL refusé, REAL → DEMO en copie, fichier corrompu rejeté, migration V1.0), CSV ;
@@ -406,5 +459,13 @@ npm run test
 - Unarchive d'une correction « delete from here » n'est possible que si la branche corrigée n'a rien enregistré
   depuis ; sinon, passer par Undo ou la restauration d'un snapshot.
 - La profondeur de l'Undo est bornée par la rétention des snapshots automatiques (50 par défaut).
+- Le verrou de financement REAL protège le ledger courant : annuler (Undo) la création de A, ou restaurer un
+  snapshot antérieur à A, rembobine le ledger lui-même (même financement unique, pas un second apport). Un
+  import REAL remplace le ledger entier, avec son propre état de financement et son registre de codes.
+- Factory Reset conserve les réglages de stratégie courants mais repart d'un historique de stratégie vide
+  (révision 0) ; l'ancien historique reste dans le snapshot RECOVERY.
+- Le refus d'une seconde racine REAL est appliqué par le serveur ; l'interface masque les points d'entrée, mais
+  un onglet ouvert avant le financement peut encore afficher le bouton jusqu'au prochain rafraîchissement (le
+  serveur refuse alors avec le message de verrouillage).
 - **Voyage dans le temps** : capital et statut rejoués ; les totaux BANK/enfants des nœuds ne sont pas historisés.
 - Capture d'écran de ticket : champ prévu, upload non implémenté. La devise est un paramètre d'affichage.

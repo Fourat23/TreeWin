@@ -26,6 +26,14 @@ export const bankFiltersSchema = z.object({
 });
 export type BankFilters = z.output<typeof bankFiltersSchema>;
 
+export const BANK_ORIGINS = ["P1", "THRESHOLD", "MATURE_PROFIT", "MANUAL"] as const;
+export type BankOrigin = (typeof BANK_ORIGINS)[number];
+
+/** MANUAL = an explicit "Secure to BANK" transfer, never a strategy harvest. */
+export function bankOrigin(t: Pick<BankTransactionDTO, "type" | "harvestKind">): BankOrigin {
+  return t.type === "MANUAL" || t.harvestKind === null ? "MANUAL" : t.harvestKind;
+}
+
 export interface BankDTO {
   totalCents: Cents;
   status: BankStatusTotals;
@@ -41,6 +49,8 @@ export interface BankDTO {
   }[];
   byProfile: { profile: Profile; amountCents: Cents; count: number }[];
   byDestination: { destination: BankDestination; amountCents: Cents; count: number }[];
+  /** Strategy harvests (P1, threshold, mature profit) vs explicit manual transfers. */
+  byOrigin: { origin: BankOrigin; amountCents: Cents; count: number }[];
   series: { day: string; cumulativeCents: Cents; withdrawnCents: Cents }[];
   branchCodes: string[];
 }
@@ -131,6 +141,14 @@ export function getBankData(
         destination,
         amountCents: ofDestination.reduce((s, t) => s + t.amountCents, 0),
         count: ofDestination.length,
+      };
+    }),
+    byOrigin: BANK_ORIGINS.map((origin) => {
+      const ofOrigin = transactions.filter((t) => bankOrigin(t) === origin);
+      return {
+        origin,
+        amountCents: ofOrigin.reduce((s, t) => s + t.amountCents, 0),
+        count: ofOrigin.length,
       };
     }),
     series,

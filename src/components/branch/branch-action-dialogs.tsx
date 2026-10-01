@@ -134,8 +134,9 @@ function ActionForm({
       {kind === "adjust" ? (
         <>
           <p className="text-sm text-fg-muted">
-            For data-entry errors or Winamax corrections only. Creates a MANUAL_ADJUSTMENT event.
-            Current capital:{" "}
+            A correction tool for data-entry errors or Winamax corrections — not a funding mechanism
+            (external capital enters a REAL ledger only once, as the €100 seed). The reason is
+            journaled as a MANUAL_ADJUSTMENT and the change can be undone. Current capital:{" "}
             <span className="num text-fg">{f.money(branch.currentCapitalCents)}</span>.
           </p>
           <div className="grid grid-cols-[96px_1fr] gap-2">

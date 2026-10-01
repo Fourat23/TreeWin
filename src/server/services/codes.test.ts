@@ -83,8 +83,8 @@ describe("branch codes are reserved forever", () => {
     h.expectValid();
   });
 
-  it("a permanently purged root keeps its letter reserved", () => {
-    const h = workspaceHarness("REAL");
+  it("a permanently purged root keeps its letter reserved (DEMO: several roots)", () => {
+    const h = workspaceHarness("DEMO");
     const a = createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx());
     createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx());
     applyCorrection(

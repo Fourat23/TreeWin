@@ -7,9 +7,9 @@ import { WORKSPACE_COOKIE } from "@/lib/workspace";
 import { prepareImport, type ImportPreview } from "../services/backup-service";
 import { buildDemoState } from "../services/demo-seed";
 import { DomainError } from "../services/errors";
+import { factoryResetReal, type FactoryResetResult } from "../services/ledger-service";
 import { saveSettings } from "../services/settings-service";
 import { getRepository } from "../state";
-import { createEmptyState } from "../state/integrity";
 import type { BackupInfo } from "../state/repository";
 import type { WorkspaceState } from "../state/schema";
 import { runAction, type ActionResult } from "./result";
@@ -167,10 +167,6 @@ export async function importWorkspaceAction(
         `Type REPLACE to confirm replacing the current ${ws} data`,
       );
     }
-    // Codes used before the import stay reserved (never reassigned to another branch).
-    state.metadata.reservedCodes = [
-      ...new Set([...current.metadata.reservedCodes, ...state.metadata.reservedCodes]),
-    ];
     await repo.replace(
       ws,
       state,
@@ -224,24 +220,23 @@ export async function resetDemoAction(
 }
 
 /** Wipe every REAL record (settings kept). Requires typing RESET REAL; snapshot taken first. */
-export async function resetRealAction(
+/**
+ * Factory Reset REAL: end the current REAL ledger and start a brand-new one (root A, single
+ * €100 seed). The complete old ledger is saved first as a RECOVERY backup. Requires typing
+ * RESET REAL exactly.
+ */
+export async function factoryResetRealAction(
   workspace: string,
   confirmation: string,
-): Promise<ActionResult> {
+): Promise<ActionResult<FactoryResetResult>> {
   return runAction(async () => {
     if (requireWorkspace(workspace) !== "REAL")
-      throw new DomainError("WORKSPACE_MISMATCH", "Not the REAL workspace");
-    if (confirmation.trim() !== "RESET REAL")
-      throw new DomainError("VALIDATION", "Type RESET REAL to confirm");
-    const repo = getRepository();
-    const current = await repo.load("REAL");
-    const empty = createEmptyState("REAL", new Date(), current.settings);
-    empty.settingsHistory = structuredClone(current.settingsHistory);
-    empty.metadata.strategyRevision = current.metadata.strategyRevision;
-    empty.metadata.mutationCount = current.metadata.mutationCount;
-    // Branch codes stay reserved forever, even across a reset.
-    empty.metadata.reservedCodes = [...current.metadata.reservedCodes];
-    await repo.replace("REAL", empty, "Reset REAL workspace (all records deleted)");
+      throw new DomainError(
+        "WORKSPACE_MISMATCH",
+        "Factory Reset only applies to the REAL workspace",
+      );
+    const result = await factoryResetReal(getRepository(), confirmation);
     refreshAll();
+    return result;
   });
 }

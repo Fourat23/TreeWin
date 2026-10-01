@@ -21,7 +21,7 @@ import { ActivityFeed } from "./activity-feed";
 
 export function DashboardView({ data }: { data: DashboardDTO }) {
   const f = useFormat();
-  const { openNewTicket, openCreateBranch } = useUi();
+  const { openNewTicket, openCreateBranch, hints, workspace } = useUi();
 
   const { totals, tickets, branchCounts, bankPeriods } = data;
   const hasBank = totals.bankCents > 0;
@@ -30,6 +30,21 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
   return (
     <div className="flex flex-col gap-5">
       {data.isEmpty ? <EmptyDashboard /> : null}
+      {!data.isEmpty && workspace === "REAL" && branchCounts.alive === 0 ? (
+        <Card data-testid="ledger-finished">
+          <div className="flex items-start gap-3 px-6 py-4 text-sm">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
+            <p className="text-fg-muted">
+              <strong className="text-fg">
+                Every REAL branch is dead — this ledger is finished.
+              </strong>{" "}
+              External capital enters a REAL ledger only once and the BANK never funds branches.
+              Starting again with a new €100 seed requires a Factory Reset REAL (Settings), which
+              starts a brand-new ledger after saving this one as a recovery snapshot.
+            </p>
+          </div>
+        </Card>
+      ) : null}
       <div className="grid gap-5 xl:grid-cols-[1.35fr_1fr]">
         <Card className="relative overflow-hidden">
           <div className="px-6 pt-5 pb-6">
@@ -268,9 +283,11 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
         <Button variant="primary" onClick={() => openNewTicket()}>
           <Plus /> New round
         </Button>
-        <Button onClick={openCreateBranch}>
-          <Sprout /> Create branch
-        </Button>
+        {hints.canCreateRoot ? (
+          <Button onClick={openCreateBranch}>
+            <Sprout /> Create branch
+          </Button>
+        ) : null}
       </div>
     </div>
   );
@@ -370,22 +387,30 @@ function ProfileBars({ profiles }: { profiles: DashboardDTO["profiles"] }) {
 }
 
 function EmptyDashboard() {
-  const { openCreateBranch, notifyMutation, workspace } = useUi();
+  const { openCreateBranch, notifyMutation, workspace, hints } = useUi();
+  const f = useFormat();
   const [pending, startTransition] = useTransition();
+  const locked = workspace === "REAL" && !hints.canCreateRoot;
   return (
     <Card data-testid="empty-dashboard">
       <div className="flex flex-col items-start gap-4 px-6 py-5 sm:flex-row sm:items-center">
         <Sprout className="size-7 shrink-0 text-harvest" aria-hidden />
         <div className="min-w-0 flex-1">
           <h2 className="text-base font-semibold">
-            {workspace === "REAL"
-              ? "Your REAL workspace is empty — plant the first branch"
-              : "The DEMO workspace is empty"}
+            {locked
+              ? "This REAL ledger has no visible branch — and its external funding is locked"
+              : workspace === "REAL"
+                ? "Your REAL workspace is empty — plant root A with the €100 seed"
+                : "The DEMO workspace is empty"}
           </h2>
           <p className="mt-1 text-sm text-fg-muted">
-            {workspace === "REAL"
-              ? "A root branch is a bankroll with its own profile. Each ticket is one round on one single match, placed manually on Winamax."
-              : "Load the demonstration dataset to explore the tree, the BANK and the analytics without touching REAL data."}
+            {locked
+              ? "CELLTREE receives external capital only once per REAL ledger. A new €100 seed requires a Factory Reset REAL (Settings), which starts a brand-new ledger after saving this one."
+              : workspace === "REAL"
+                ? `External capital enters REAL exactly once: a single root funded with ${f.money(
+                    hints.realSeedCents,
+                  )}. Every later branch comes from strategy splits. Each ticket is one round on one single match, placed manually on Winamax.`
+                : "Load the demonstration dataset to explore the tree, the BANK and the analytics without touching REAL data."}
           </p>
           <p className="mt-2 flex items-center gap-2 text-xs text-fg-subtle">
             <TriangleAlert className="size-3.5" /> CELLTREE never connects to Winamax and never
@@ -393,9 +418,11 @@ function EmptyDashboard() {
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
-          <Button variant="primary" onClick={openCreateBranch}>
-            <Plus /> Create root branch
-          </Button>
+          {hints.canCreateRoot ? (
+            <Button variant="primary" onClick={openCreateBranch}>
+              <Plus /> Create root branch
+            </Button>
+          ) : null}
           {workspace === "DEMO" ? (
             <Button
               disabled={pending}

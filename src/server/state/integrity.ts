@@ -1,8 +1,10 @@
 import { verifyLedger } from "@/domain/branches/metrics";
 import { DEFAULT_SETTINGS, type StrategySettings } from "@/domain/strategy/settings";
-import type { Workspace } from "@/domain/types";
+import { isRootCode } from "@/domain/branches/codes";
+import { REAL_INITIAL_SEED_CENTS, type Workspace } from "@/domain/types";
 import { REPLAYED_FIELDS, replayBranch } from "./replay";
 import {
+  freshInitialFunding,
   STATE_FORMAT,
   STATE_SCHEMA_VERSION,
   workspaceStateSchema,
@@ -38,6 +40,7 @@ export function createEmptyState(
       demoSeed: null,
       lastChange: null,
       reservedCodes: [],
+      initialFunding: freshInitialFunding(),
     },
   };
 }
@@ -85,6 +88,19 @@ function checkState(
   }
   if (state.workspace === "REAL" && state.metadata.demoSeed !== null) {
     add("REAL workspace contains demo data marker");
+  }
+  if (state.workspace === "REAL") {
+    const funding = state.metadata.initialFunding;
+    if (funding.amountCents !== REAL_INITIAL_SEED_CENTS) {
+      add("REAL initial funding must be the 100.00 seed");
+    }
+    const hasRootHistory =
+      state.branches.some((b) => b.parentId === null) ||
+      state.archive.some((a) => a.branches.some((b) => b.parentId === null)) ||
+      state.metadata.reservedCodes.some((c) => isRootCode(c));
+    if (!funding.consumed && (hasRootHistory || funding.rootBranchId !== null)) {
+      add("REAL external funding is marked unused although a root branch exists or existed");
+    }
   }
   if (state.strategyVersion !== state.settings.strategyVersion) {
     add("strategyVersion does not match the settings");

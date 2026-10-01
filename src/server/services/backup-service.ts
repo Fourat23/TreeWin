@@ -12,6 +12,7 @@ import {
   STATE_FORMAT,
   STATE_SCHEMA_VERSION,
   backupFileSchema,
+  deriveInitialFunding,
   workspaceStateSchema,
   type BackupFile,
   type BranchEventRecord,
@@ -252,6 +253,8 @@ export function migrateLegacyBackup(
       demoSeed: looksLikeDemo ? { seededAt: now.getTime() } : null,
       lastChange: null,
       reservedCodes: [],
+      // A V1.0 history with any root has consumed its external funding.
+      initialFunding: deriveInitialFunding({ branches }),
     },
   };
   const valid = workspaceStateSchema.safeParse(state);

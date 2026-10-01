@@ -82,7 +82,14 @@ export class StateLoadError extends Error {
   }
 }
 
-const BACKUP_ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}(-\d+)?(-manual|-export)?$/;
+const BACKUP_ID_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}(-\d+)?(-manual|-export|-recovery)?$/;
+const KIND_SUFFIX: Record<BackupKind, string> = {
+  AUTO: "",
+  MANUAL: "-manual",
+  EXPORT: "-export",
+  RECOVERY: "-recovery",
+};
 
 function stamp(date: Date): string {
   return date.toISOString().replace(/[:.]/g, "-").replace(/Z$/, "");
@@ -355,7 +362,7 @@ export class FileStateRepository implements StateRepository {
             const buffer = Buffer.alloc(Math.min(size, 2048));
             await handle.read(buffer, 0, buffer.length, 0);
             const head = buffer.toString("utf8");
-            const kind = /"kind":\s*"(AUTO|MANUAL|EXPORT)"/.exec(head)?.[1] as
+            const kind = /"kind":\s*"(AUTO|MANUAL|EXPORT|RECOVERY)"/.exec(head)?.[1] as
               BackupKind | undefined;
             const createdAt = Number(/"createdAt":\s*(\d+)/.exec(head)?.[1] ?? 0);
             const reason = /"reason":\s*("(?:[^"\\]|\\.)*")/.exec(head)?.[1];
@@ -383,7 +390,7 @@ export class FileStateRepository implements StateRepository {
   ): Promise<BackupInfo> {
     const dir = this.paths(workspace).backups;
     await fs.mkdir(dir, { recursive: true });
-    const suffix = kind === "MANUAL" ? "-manual" : kind === "EXPORT" ? "-export" : "";
+    const suffix = KIND_SUFFIX[kind];
     let id = `${stamp(now)}${suffix}`;
     for (let n = 1; await fileExists(join(dir, `${id}.json`)); n += 1)
       id = `${stamp(now)}-${n}${suffix}`;
@@ -403,12 +410,12 @@ export class FileStateRepository implements StateRepository {
     return { id, kind, reason, createdAt: now.getTime(), sizeBytes: Buffer.byteLength(json) };
   }
 
-  /** Keep the newest N automatic snapshots. Manual backups and exports are never deleted. */
+  /** Keep the newest N automatic snapshots. Manual, export and recovery backups are never deleted. */
   private async pruneAutomatic(workspace: Workspace, keep: number): Promise<void> {
     const dir = this.paths(workspace).backups;
     const automatic = (await fs.readdir(dir))
       .filter((n) => n.endsWith(".json") && BACKUP_ID_RE.test(n.slice(0, -5)))
-      .filter((n) => !n.includes("-manual") && !n.includes("-export"))
+      .filter((n) => !n.includes("-manual") && !n.includes("-export") && !n.includes("-recovery"))
       .sort();
     const excess = automatic.length - keep;
     for (const name of automatic.slice(0, Math.max(0, excess)))

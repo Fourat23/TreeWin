@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { parseMoney } from "@/domain/money";
 import { PROFILES, type Profile } from "@/domain/types";
+import { useFormat } from "@/components/providers/format-provider";
 import { useUi } from "@/components/providers/ui-provider";
 import { AmountInput } from "@/components/ui/amount-input";
 import { Button } from "@/components/ui/button";
@@ -27,7 +28,7 @@ export function CreateBranchDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="Create root branch"
-      description="A root brings new external capital into the ecosystem. BANK money can never fund a branch."
+      description="A root brings external capital into the ecosystem. BANK money can never fund a branch."
       size="md"
     >
       {open ? <CreateBranchForm onCreated={onCreated} /> : null}
@@ -37,6 +38,8 @@ export function CreateBranchDialog({
 
 function CreateBranchForm({ onCreated }: { onCreated: (id: string) => void }) {
   const { hints, workspace } = useUi();
+  const f = useFormat();
+  const real = workspace === "REAL";
   const [profile, setProfile] = useState<Profile>(hints.defaultProfile);
   const [capital, setCapital] = useState("100");
   const [notes, setNotes] = useState("");
@@ -44,7 +47,8 @@ function CreateBranchForm({ onCreated }: { onCreated: (id: string) => void }) {
   const [pending, startTransition] = useTransition();
 
   function submit() {
-    const capitalCents = parseMoney(capital);
+    // REAL: the single external seed is fixed (the server enforces it as well).
+    const capitalCents = real ? hints.realSeedCents : parseMoney(capital);
     if (capitalCents === null || capitalCents < 100) {
       setError("Enter an initial capital of at least 1.00");
       return;
@@ -102,16 +106,35 @@ function CreateBranchForm({ onCreated }: { onCreated: (id: string) => void }) {
           ))}
         </div>
       </fieldset>
-      <Field label="Initial capital" error={error}>
-        {(p) => (
-          <AmountInput
-            {...p}
-            suffix="€"
-            value={capital}
-            onChange={(e) => setCapital(e.target.value)}
-          />
-        )}
-      </Field>
+      {real ? (
+        <div
+          className="rounded-xl border border-border bg-surface-2 px-4 py-3"
+          data-testid="real-seed"
+        >
+          <p className="text-[13px] font-medium text-fg-muted">Initial external seed</p>
+          <p className="mt-1 num text-2xl font-semibold">{f.money(hints.realSeedCents)}</p>
+          <p className="mt-1 text-xs text-fg-subtle">
+            Fixed by REAL V1. External capital enters a REAL ledger only once: after this root,
+            every new branch comes from strategy splits and no other root can be created.
+          </p>
+          {error ? (
+            <p className="mt-2 text-xs text-critical" role="alert">
+              {error}
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <Field label="Initial capital" error={error} hint="DEMO: any amount, any number of roots.">
+          {(p) => (
+            <AmountInput
+              {...p}
+              suffix="€"
+              value={capital}
+              onChange={(e) => setCapital(e.target.value)}
+            />
+          )}
+        </Field>
+      )}
       <Field label="Notes (optional)">
         {(p) => <Textarea {...p} value={notes} onChange={(e) => setNotes(e.target.value)} />}
       </Field>
