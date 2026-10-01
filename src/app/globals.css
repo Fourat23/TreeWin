@@ -1,0 +1,276 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+ * Design tokens. Dark is the primary theme; light is a selected variant, not an inversion.
+ * Profile hues were validated for colour-vision deficiencies against each surface
+ * (all-pairs ΔE ≥ 8 dark); profiles are always also labelled with text, never colour alone.
+ */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0d11;
+  --surface: #12151b;
+  --surface-2: #181c24;
+  --surface-3: #202532;
+  --border: #242a37;
+  --border-strong: #323a4b;
+  --fg: #e8eaf0;
+  --fg-muted: #a0a8b9;
+  --fg-subtle: #6e7689;
+  --ink: #f2f4f8;
+  --ink-fg: #0b0d11;
+
+  --harvest: #1f9d6c;
+  --balanced: #4597ea;
+  --growth: #8f42d8;
+
+  --mature: #e3b341;
+  --dead: #4d5361;
+  --dead-accent: #6b3a3a;
+  --paused: #d99a3c;
+
+  --good: #2fb36f;
+  --warning: #fab219;
+  --critical: #e05252;
+
+  --secured: #e8eaf0;
+  --at-risk: #59627a;
+
+  --grid: #1c212b;
+  --focus: #8ab4ff;
+  --shadow: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 8px 24px rgb(0 0 0 / 0.35);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #f2f4f7;
+  --surface-3: #e8ebf0;
+  --border: #e2e5eb;
+  --border-strong: #cdd2db;
+  --fg: #10131a;
+  --fg-muted: #4d5567;
+  --fg-subtle: #7a8293;
+  --ink: #10131a;
+  --ink-fg: #ffffff;
+
+  --harvest: #178a5d;
+  --balanced: #2f7fdc;
+  --growth: #8338c8;
+
+  --mature: #b7860b;
+  --dead: #a3a9b4;
+  --dead-accent: #c99a9a;
+  --paused: #c27c12;
+
+  --good: #148a4f;
+  --warning: #b97f00;
+  --critical: #c93636;
+
+  --secured: #10131a;
+  --at-risk: #a9b0bf;
+
+  --grid: #eceef2;
+  --focus: #2f6fdc;
+  --shadow: 0 1px 2px rgb(16 19 26 / 0.06), 0 8px 24px rgb(16 19 26 / 0.06);
+}
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", monospace;
+
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-ink: var(--ink);
+  --color-ink-fg: var(--ink-fg);
+  --color-harvest: var(--harvest);
+  --color-balanced: var(--balanced);
+  --color-growth: var(--growth);
+  --color-mature: var(--mature);
+  --color-dead: var(--dead);
+  --color-dead-accent: var(--dead-accent);
+  --color-paused: var(--paused);
+  --color-good: var(--good);
+  --color-warning: var(--warning);
+  --color-critical: var(--critical);
+  --color-secured: var(--secured);
+  --color-at-risk: var(--at-risk);
+  --color-grid: var(--grid);
+  --color-focus: var(--focus);
+  --shadow-panel: var(--shadow);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--focus) 35%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+}
+
+@utility num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "ss01";
+}
+
+@utility card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.875rem;
+}
+
+/* ---------- Motion (all disabled under prefers-reduced-motion) ---------- */
+
+@keyframes ct-pop-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ct-halo {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--mature) 70%, transparent),
+      0 0 14px 1px color-mix(in oklab, var(--mature) 22%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--mature) 90%, transparent),
+      0 0 22px 3px color-mix(in oklab, var(--mature) 32%, transparent);
+  }
+}
+
+@keyframes ct-fade-dead {
+  from {
+    filter: saturate(1);
+    opacity: 1;
+  }
+  to {
+    filter: saturate(0.05);
+    opacity: 0.72;
+  }
+}
+
+@keyframes ct-edge-flash {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes ct-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ct-pop-in {
+  animation: ct-pop-in 420ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+.ct-halo {
+  animation: ct-halo 3.2s ease-in-out infinite;
+}
+.ct-dead {
+  animation: ct-fade-dead 900ms ease-out both;
+}
+.ct-rise {
+  animation: ct-rise 260ms ease-out both;
+}
+.ct-edge-new path.react-flow__edge-path {
+  stroke-dasharray: 6 6;
+  animation: ct-edge-flash 600ms linear 4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-pop-in,
+  .ct-halo,
+  .ct-dead,
+  .ct-rise,
+  .ct-edge-new path.react-flow__edge-path {
+    animation: none !important;
+  }
+  .ct-dead {
+    filter: saturate(0.05);
+    opacity: 0.72;
+  }
+  .ct-halo {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--mature) 80%, transparent),
+      0 0 16px 2px color-mix(in oklab, var(--mature) 25%, transparent);
+  }
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- React Flow theming ---------- */
+
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-edge-stroke: var(--border-strong);
+  --xy-edge-stroke-selected: var(--fg-muted);
+  --xy-controls-button-background-color: var(--surface-2);
+  --xy-controls-button-background-color-hover: var(--surface-3);
+  --xy-controls-button-color: var(--fg);
+  --xy-controls-button-border-color: var(--border);
+  --xy-minimap-background-color: var(--surface);
+  --xy-minimap-mask-background-color: color-mix(in oklab, var(--bg) 70%, transparent);
+  --xy-node-boxshadow-selected: none;
+  --xy-attribution-background-color: transparent;
+}
+.react-flow__controls {
+  border-radius: 0.6rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+.react-flow__node:focus-visible {
+  outline: none;
+}
