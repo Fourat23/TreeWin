@@ -10,9 +10,31 @@ import type { Profile } from "../types";
  * or a 1× multiple), money is integer cents, odds are basis points (1.30 = 13_000).
  */
 
-const bp = z.int().min(0).max(1_000_000);
-const share = z.int().min(0).max(BP_SCALE);
-const cents = z.int().min(0).max(100_000_000_000);
+// Builders with human-readable bounds (values are stored scaled, messages speak in units).
+const multiple = (min: number, max: number) =>
+  z
+    .int()
+    .min(min, { error: `Must be at least ${min / BP_SCALE}×` })
+    .max(max, { error: `Must be at most ${max / BP_SCALE}×` });
+const oddsBounds = (min: number, max: number) =>
+  z
+    .int()
+    .min(min, { error: `Odds must be at least ${(min / BP_SCALE).toFixed(2)}` })
+    .max(max, { error: `Odds must be at most ${(max / BP_SCALE).toFixed(2)}` });
+const share = z
+  .int()
+  .min(0, { error: "Must be between 0 and 100 %" })
+  .max(BP_SCALE, { error: "Must be between 0 and 100 %" });
+const money = (min: number) =>
+  z
+    .int()
+    .min(min, { error: `Must be at least ${(min / 100).toFixed(2)}` })
+    .max(100_000_000_000, { error: "Amount too large" });
+const count = (min: number, max: number) =>
+  z
+    .int()
+    .min(min, { error: `Must be at least ${min}` })
+    .max(max, { error: `Must be at most ${max}` });
 
 export const P1_TRIGGERS = ["TARGET_PATH", "CAPITAL_MULTIPLE", "WIN_COUNT"] as const;
 export const CHILD_PROFILE_ASSIGNMENTS = ["QUOTA", "RANDOM", "INHERIT"] as const;
@@ -32,30 +54,30 @@ export const p1SettingsSchema = z
      * In every mode the split must leave at least `minMotherRemainingBp × S` in the mother.
      */
     trigger: z.enum(P1_TRIGGERS),
-    targetOddsBp: z.int().min(10_100).max(100_000),
-    targetWins: z.int().min(1).max(50),
-    capitalMultipleBp: z.int().min(10_000).max(1_000_000),
+    targetOddsBp: oddsBounds(10_100, 100_000),
+    targetWins: count(1, 50),
+    capitalMultipleBp: multiple(10_000, 1_000_000),
     /** Amount sent to BANK at P1, as a multiple of S (10_000 = 1 × S). */
-    bankMultipleBp: bp,
+    bankMultipleBp: multiple(0, 1_000_000),
     /** Capital of the child created at P1, as a multiple of S. */
-    childMultipleBp: bp,
+    childMultipleBp: multiple(0, 1_000_000),
     /** Minimum the mother must keep after P1, as a multiple of S. */
-    minMotherRemainingBp: bp,
+    minMotherRemainingBp: multiple(0, 1_000_000),
   })
   .strict();
 
 export const profileRulesSchema = z
   .object({
     /** First post-P1 threshold, as a multiple of S (40_000 = 4 × S). */
-    firstThresholdBp: z.int().min(10_000).max(10_000_000),
+    firstThresholdBp: multiple(10_000, 10_000_000),
     /** Each following threshold = previous × factor (20_000 = doubles). */
-    thresholdFactorBp: z.int().min(10_100).max(100_000),
+    thresholdFactorBp: multiple(10_100, 100_000),
     /** Share of the capital sent to BANK when a threshold is reached. */
     bankShareBp: share,
     /** Share of the capital used to create a child when a threshold is reached. */
     childShareBp: share,
     /** Active-capital cap. Reaching it makes the branch MATURE. */
-    capCents: cents.min(100),
+    capCents: money(100),
   })
   .strict()
   .refine((r) => r.bankShareBp + r.childShareBp < BP_SCALE, {
@@ -88,20 +110,20 @@ export const strategySettingsSchema = z
       })
       .strict(),
     /** Child amounts below this are sent to BANK instead of creating a dust branch. */
-    minChildCapitalCents: cents,
+    minChildCapitalCents: money(0),
     odds: z
-      .object({ minBp: z.int().min(10_100), maxBp: z.int().min(10_100) })
+      .object({ minBp: oddsBounds(10_100, 10_000_000), maxBp: oddsBounds(10_100, 10_000_000) })
       .strict()
       .refine((o) => o.minBp <= o.maxBp, { error: "Min odds must be ≤ max odds", path: ["maxBp"] }),
     limits: z
       .object({
-        maxPendingTickets: z.int().min(1).max(10_000).nullable(),
-        maxTicketsPerDay: z.int().min(1).max(10_000).nullable(),
+        maxPendingTickets: count(1, 10_000).nullable(),
+        maxTicketsPerDay: count(1, 10_000).nullable(),
       })
       .strict(),
     sameEventPolicy: z.enum(SAME_EVENT_POLICIES),
     voidCountsAsRound: z.boolean(),
-    analytics: z.object({ minSampleSize: z.int().min(1).max(10_000) }).strict(),
+    analytics: z.object({ minSampleSize: count(1, 10_000) }).strict(),
   })
   .strict();
 

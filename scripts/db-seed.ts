@@ -7,6 +7,10 @@ const handle = openDatabase();
 runMigrations(handle.db);
 
 if (!isDatabaseEmpty(handle.db)) {
+  if (reset && process.env.NODE_ENV === "production") {
+    console.error("✖ Refusing to wipe data with NODE_ENV=production.");
+    process.exit(1);
+  }
   if (!reset) {
     console.error(
       `✖ ${handle.path} already contains data. Nothing was changed.\n` +

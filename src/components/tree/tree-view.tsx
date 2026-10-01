@@ -147,6 +147,9 @@ function TreeCanvas({ branches: liveBranches }: { branches: BranchSummaryDTO[] }
       id: v.branch.id,
       type: "branch",
       position: positions.get(v.branch.id) ?? { x: 0, y: 0 },
+      // Explicit size (known from the scale): lets the minimap and fitView work before measuring.
+      width: NODE_WIDTH * (scales.get(v.branch.id) ?? 1),
+      height: NODE_HEIGHT * (scales.get(v.branch.id) ?? 1),
       draggable: false,
       connectable: false,
       data: {

@@ -20,6 +20,8 @@ export interface FormatConfig {
 export interface Formatters extends FormatConfig {
   money: (cents: number, options?: Omit<MoneyFormatOptions, "locale" | "currency">) => string;
   odds: (bp: number) => string;
+  /** Averages of odds, rounded to Winamax precision (2 decimals). */
+  avgOdds: (bp: number) => string;
   pct: (bp: number, digits?: number, signed?: boolean) => string;
   ratio: (value: number, digits?: number) => string;
   num: (value: number, digits?: number) => string;
@@ -38,6 +40,7 @@ export function buildFormatters(config: FormatConfig): Formatters {
     ...config,
     money: (cents, options) => formatMoney(cents, { ...options, locale, currency }),
     odds: (bp) => formatOdds(bp),
+    avgOdds: (bp) => formatOdds(Math.round(bp / 100) * 100),
     pct: (bp, digits = 1, signed = false) => formatBp(bp, { locale, digits, signed }),
     ratio: (value, digits = 1) => formatBp(value * 10_000, { locale, digits }),
     num: (value, digits = 0) => formatNumber(value, locale, digits),

@@ -128,7 +128,7 @@ export function DashboardView({ data }: { data: DashboardDTO }) {
         />
         <Tile
           label="Average odds"
-          value={tickets.avgOddsBp === null ? "—" : f.odds(tickets.avgOddsBp)}
+          value={tickets.avgOddsBp === null ? "—" : f.avgOdds(tickets.avgOddsBp)}
         />
         <Tile
           label="Average stake"

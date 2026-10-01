@@ -585,7 +585,7 @@ function StatsTab({ detail }: { detail: BranchDetailDTO }) {
   const { branch, stats } = detail;
   const items: [string, string][] = [
     ["Win rate", stats.winRate === null ? "—" : f.ratio(stats.winRate)],
-    ["Average odds", stats.avgOddsBp === null ? "—" : f.odds(stats.avgOddsBp)],
+    ["Average odds", stats.avgOddsBp === null ? "—" : f.avgOdds(stats.avgOddsBp)],
     ["Best streak", `${stats.bestStreak} wins`],
     ["Lifetime value", f.money(branch.ltvCents)],
     ["Branch ROI", f.pct(stats.roiBp, 1, true)],
