@@ -17,7 +17,14 @@ export default async function CandidatesPage() {
         title="Candidates"
         description="Shadow portfolio: matches analysed but not played — statistics without staking."
       />
-      <CandidatesView candidates={listCandidates(state).map(toCandidateDTO)} stats={stats} />
+      <CandidatesView
+        candidates={listCandidates(state).map(toCandidateDTO)}
+        archived={state.candidates
+          .filter((c) => c.archivedAt !== null)
+          .sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0))
+          .map(toCandidateDTO)}
+        stats={stats}
+      />
     </PageContainer>
   );
 }

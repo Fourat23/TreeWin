@@ -26,13 +26,24 @@ export const createRootBranchSchema = z.object({
 });
 export type CreateRootBranchInput = z.input<typeof createRootBranchSchema>;
 
-/** Codes of every root ever created (archived ones included: codes are never reused). */
-function usedRootCodes(state: WorkspaceState): string[] {
-  const live = state.branches.filter((b) => b.parentId === null).map((b) => b.code);
-  const archived = state.archive.flatMap((a) =>
-    a.branches.filter((b) => b.parentId === null).map((b) => b.code),
-  );
-  return [...live, ...archived];
+/**
+ * Every branch code ever assigned in the workspace: the tombstone registry plus, defensively,
+ * live and archived branches. Codes are reserved forever (death, archive, correction, purge).
+ */
+export function reservedBranchCodes(state: WorkspaceState): Set<string> {
+  return new Set([
+    ...state.metadata.reservedCodes,
+    ...state.branches.map((b) => b.code),
+    ...state.archive.flatMap((a) => a.branches.map((b) => b.code)),
+  ]);
+}
+
+/** Record a newly assigned code in the registry (never removed afterwards). */
+export function reserveBranchCode(state: WorkspaceState, code: string): void {
+  if (reservedBranchCodes(state).has(code)) {
+    throw new DomainError("INVALID_STATE", `Branch code ${code} has already been used`);
+  }
+  state.metadata.reservedCodes.push(code);
 }
 
 /**
@@ -47,7 +58,7 @@ export function createRootBranch(
   const data = parseInput(createRootBranchSchema, input);
   const fmt = moneyFormatter(state.settings);
   const now = ctx.now.getTime();
-  const code = nextRootCode(usedRootCodes(state));
+  const code = nextRootCode([...reservedBranchCodes(state)]);
   const capCents = state.settings.profiles[data.profile].capCents;
   const branch: BranchRecord = {
     id: newId(),
@@ -81,6 +92,7 @@ export function createRootBranch(
     notes: data.notes ?? null,
     ...strategyStamp(state),
   };
+  reserveBranchCode(state, code);
   state.branches.push(branch);
   branch.birthEventId = pushEvent(state, {
     branchId: branch.id,
@@ -322,9 +334,10 @@ export function updateBranchNotes(
   state: WorkspaceState,
   input: z.input<typeof updateBranchNotesSchema>,
   ctx: OpContext,
-): void {
+): BranchRecord {
   const data = parseInput(updateBranchNotesSchema, input);
   const branch = getBranchOrThrow(state, data.branchId);
   branch.notes = data.notes || null;
   branch.updatedAt = ctx.now.getTime();
+  return branch;
 }

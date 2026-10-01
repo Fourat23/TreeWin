@@ -2,7 +2,7 @@ import { z } from "zod";
 import { BANK_DESTINATIONS } from "@/domain/types";
 import type { BankTransactionRecord, WorkspaceState } from "../state/schema";
 import { DomainError, notFound } from "./errors";
-import { parseInput, type OpContext } from "./internal";
+import { localDay, parseInput, type OpContext } from "./internal";
 
 /**
  * BANK bookkeeping. Money secured to the BANK has left the branch ecosystem for good:
@@ -25,15 +25,42 @@ function pick(state: WorkspaceState, ids: readonly string[]): BankTransactionRec
   });
 }
 
+const daySchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, { error: "Withdrawal date must be YYYY-MM-DD" })
+  .refine(isCalendarDay, { error: "Invalid withdrawal date" });
+
 export const markWithdrawnSchema = z.object({
   transactionIds: idsSchema,
-  /** Withdrawal day (YYYY-MM-DD); defaults to now. */
-  withdrawnOn: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .optional(),
+  /** Local day of the withdrawal (YYYY-MM-DD). Defaults to today; never in the future. */
+  withdrawnOn: daySchema.optional(),
   destination: z.enum(BANK_DESTINATIONS).optional(),
 });
+
+/**
+ * Timestamp stored in `withdrawnAt` for a withdrawal day: now for today, local noon for a past
+ * day, never before the money was secured. Future days are refused (no scheduled withdrawals).
+ */
+function withdrawalTimestamp(
+  day: string | undefined,
+  rows: readonly BankTransactionRecord[],
+  now: Date,
+): (tx: BankTransactionRecord) => number {
+  const today = localDay(now);
+  const chosen = day ?? today;
+  if (chosen > today) {
+    throw new DomainError("VALIDATION", "The withdrawal date cannot be in the future");
+  }
+  const earliest = rows.reduce((min, t) => Math.min(min, t.createdAt), Infinity);
+  if (rows.length > 0 && chosen < localDay(new Date(earliest))) {
+    throw new DomainError(
+      "VALIDATION",
+      "The withdrawal date cannot be before the money was secured",
+    );
+  }
+  const at = chosen === today ? now.getTime() : localNoon(chosen);
+  return (tx) => Math.max(at, tx.createdAt);
+}
 
 export function markWithdrawn(
   state: WorkspaceState,
@@ -41,25 +68,38 @@ export function markWithdrawn(
   ctx: OpContext,
 ): number {
   const data = parseInput(markWithdrawnSchema, input);
-  const at = data.withdrawnOn ? localNoon(data.withdrawnOn) : ctx.now.getTime();
-  const rows = pick(state, data.transactionIds);
-  if (rows.some((t) => at < t.createdAt - 86_400_000)) {
-    throw new DomainError(
-      "VALIDATION",
-      "The withdrawal date cannot be before the money was secured",
-    );
-  }
-  let changed = 0;
-  for (const tx of rows) {
-    if (tx.status === "WITHDRAWN") continue;
-    tx.status = "WITHDRAWN";
-    tx.withdrawnAt = Math.max(at, tx.createdAt);
-    if (data.destination) tx.destination = data.destination;
-    changed += 1;
-  }
-  if (changed === 0)
+  const rows = pick(state, data.transactionIds).filter((t) => t.status !== "WITHDRAWN");
+  if (rows.length === 0) {
     throw new DomainError("INVALID_STATE", "Every selected entry is already withdrawn");
-  return changed;
+  }
+  const stampFor = withdrawalTimestamp(data.withdrawnOn, rows, ctx.now);
+  for (const tx of rows) {
+    tx.status = "WITHDRAWN";
+    tx.withdrawnAt = stampFor(tx);
+    if (data.destination) tx.destination = data.destination;
+  }
+  return rows.length;
+}
+
+export const setWithdrawalDateSchema = z.object({
+  transactionIds: idsSchema,
+  withdrawnOn: daySchema,
+});
+
+/** Correct the withdrawal date of WITHDRAWN entries (audited and undoable like any change). */
+export function setWithdrawalDate(
+  state: WorkspaceState,
+  input: z.input<typeof setWithdrawalDateSchema>,
+  ctx: OpContext,
+): number {
+  const data = parseInput(setWithdrawalDateSchema, input);
+  const rows = pick(state, data.transactionIds);
+  if (rows.some((t) => t.status !== "WITHDRAWN")) {
+    throw new DomainError("INVALID_STATE", "Only withdrawn entries have a withdrawal date");
+  }
+  const stampFor = withdrawalTimestamp(data.withdrawnOn, rows, ctx.now);
+  for (const tx of rows) tx.withdrawnAt = stampFor(tx);
+  return rows.length;
 }
 
 export const undoWithdrawnSchema = z.object({ transactionIds: idsSchema });
@@ -115,6 +155,12 @@ export function bankStatusTotals(
     if (tx.status === "WITHDRAWN") withdrawnCents += tx.amountCents;
   }
   return { securedCents, withdrawnCents, awaitingWithdrawalCents: securedCents - withdrawnCents };
+}
+
+function isCalendarDay(day: string): boolean {
+  const [y, m, d] = day.split("-").map(Number) as [number, number, number];
+  const date = new Date(y, m - 1, d);
+  return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
 }
 
 function localNoon(day: string): number {

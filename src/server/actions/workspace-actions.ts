@@ -114,21 +114,10 @@ export async function restorePreviousSnapshotAction(
 /** Undo the last recorded change (restores the snapshot taken right before it). */
 export async function undoLastChangeAction(workspace: string): Promise<ActionResult<string>> {
   return runAction(async () => {
-    const ws = requireWorkspace(workspace);
-    const repo = getRepository();
-    const change = (await repo.load(ws)).metadata.lastChange;
-    if (!change) throw new DomainError("INVALID_STATE", "Nothing to undo");
-    try {
-      await repo.readBackup(ws, change.backupId);
-    } catch {
-      throw new DomainError(
-        "NOT_FOUND",
-        "The snapshot of this change is no longer available (retention limit)",
-      );
-    }
-    await repo.restore(ws, change.backupId, `Undo: ${change.label}`);
+    const undone = await getRepository().undo(requireWorkspace(workspace));
+    if (undone === null) throw new DomainError("INVALID_STATE", "Nothing to undo");
     refreshAll();
-    return change.label;
+    return undone;
   });
 }
 
@@ -171,12 +160,17 @@ export async function importWorkspaceAction(
     const { state, preview } = prepareImport(parseJson(input.content), ws, {
       asCopy: input.asCopy,
     });
-    if (hasData(await repo.load(ws)) && input.confirmation !== "REPLACE") {
+    const current = await repo.load(ws);
+    if (hasData(current) && input.confirmation !== "REPLACE") {
       throw new DomainError(
         "VALIDATION",
         `Type REPLACE to confirm replacing the current ${ws} data`,
       );
     }
+    // Codes used before the import stay reserved (never reassigned to another branch).
+    state.metadata.reservedCodes = [
+      ...new Set([...current.metadata.reservedCodes, ...state.metadata.reservedCodes]),
+    ];
     await repo.replace(
       ws,
       state,
@@ -245,6 +239,8 @@ export async function resetRealAction(
     empty.settingsHistory = structuredClone(current.settingsHistory);
     empty.metadata.strategyRevision = current.metadata.strategyRevision;
     empty.metadata.mutationCount = current.metadata.mutationCount;
+    // Branch codes stay reserved forever, even across a reset.
+    empty.metadata.reservedCodes = [...current.metadata.reservedCodes];
     await repo.replace("REAL", empty, "Reset REAL workspace (all records deleted)");
     refreshAll();
   });

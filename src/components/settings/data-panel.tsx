@@ -2,6 +2,7 @@
 
 import {
   Archive,
+  ArchiveRestore,
   Camera,
   Download,
   FileJson,
@@ -23,7 +24,7 @@ import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/field";
 import { withWorkspace } from "@/lib/workspace";
-import { purgeArchiveEntryAction } from "@/server/actions/correction-actions";
+import { purgeArchiveEntryAction, unarchiveEntryAction } from "@/server/actions/correction-actions";
 import {
   createBackupAction,
   importWorkspaceAction,
@@ -62,17 +63,21 @@ type Danger =
   | "reset-demo"
   | "init-demo"
   | { purgeArchive: ArchiveSummary }
+  | { unarchive: ArchiveSummary }
   | { restore: BackupInfo };
 
 export function DataPanel({
   storage,
   backups,
   archive,
+  changeLog,
   history,
 }: {
   storage: StorageInfo;
   backups: BackupInfo[];
   archive: ArchiveSummary[];
+  /** Newest first. */
+  changeLog: { at: number; label: string }[];
   history: { id: number; changedAt: number; note: string | null; revision: number }[];
 }) {
   const f = useFormat();
@@ -142,9 +147,11 @@ export function DataPanel({
           ? "Initialize DEMO data?"
           : danger && "purgeArchive" in danger
             ? "Permanently delete archived records?"
-            : danger && "restore" in danger
-              ? "Restore this snapshot?"
-              : "";
+            : danger && "unarchive" in danger
+              ? "Unarchive these records?"
+              : danger && "restore" in danger
+                ? "Restore this snapshot?"
+                : "";
   const typedRequired =
     danger === "reset-real"
       ? "RESET REAL"
@@ -168,6 +175,11 @@ export function DataPanel({
       run(
         () => initializeDemoAction(workspace),
         (s) => `DEMO initialized: ${s.branches} branches, ${s.tickets} tickets`,
+      );
+    else if ("unarchive" in danger)
+      run(
+        () => unarchiveEntryAction(workspace, { archiveId: danger.unarchive.id }),
+        (r) => `Unarchived: ${r.branches} branch(es), ${r.tickets} ticket(s) restored`,
       );
     else if ("purgeArchive" in danger)
       run(
@@ -421,7 +433,7 @@ export function DataPanel({
         <Card>
           <CardHeader
             title="Archived corrections"
-            description="Records removed by “delete from this point” (archive mode). Kept out of the ledger."
+            description="Records removed by “delete from this point” (archive mode). Kept out of the ledger; Unarchive puts them back exactly as they were when it is structurally safe."
           />
           <CardBody>
             <ul className="flex flex-col divide-y divide-border rounded-xl border border-border">
@@ -440,12 +452,50 @@ export function DataPanel({
                       {f.money(a.bankCents)}
                     </span>
                   </span>
-                  <Button size="sm" variant="ghost" onClick={() => setDanger({ purgeArchive: a })}>
-                    <Trash2 /> Purge
-                  </Button>
+                  <span className="flex shrink-0 gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDanger({ unarchive: a })}
+                      data-testid="unarchive-entry"
+                    >
+                      <ArchiveRestore /> Unarchive
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDanger({ purgeArchive: a })}
+                    >
+                      <Trash2 /> Purge
+                    </Button>
+                  </span>
                 </li>
               ))}
             </ul>
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {changeLog.length > 0 ? (
+        <Card>
+          <CardHeader
+            title="Change log"
+            description="Every persisted change of this workspace (each one has its own snapshot and can be undone)."
+          />
+          <CardBody>
+            <ol
+              className="flex max-h-72 flex-col gap-1 overflow-y-auto text-sm"
+              data-testid="change-log"
+            >
+              {changeLog.map((entry, i) => (
+                <li key={`${entry.at}-${i}`} className="flex justify-between gap-3">
+                  <span className="min-w-0 truncate text-fg-muted">{entry.label}</span>
+                  <span className="shrink-0 num text-xs text-fg-subtle">
+                    {f.dateTime(entry.at)}
+                  </span>
+                </li>
+              ))}
+            </ol>
           </CardBody>
         </Card>
       ) : null}
@@ -549,6 +599,14 @@ export function DataPanel({
             <p>
               “{danger.purgeArchive.label}” will be removed from the file for good (older snapshots
               still contain it).
+            </p>
+          ) : danger && "unarchive" in danger ? (
+            <p>
+              “{danger.unarchive.label}” — {danger.unarchive.tickets} ticket(s),{" "}
+              {danger.unarchive.branches} branch(es) and {f.money(danger.unarchive.bankCents)} of
+              BANK money go back into the ledger exactly as they were (DEAD branches stay DEAD).
+              Nothing else is restored. A snapshot is taken first; if the history has changed since,
+              the unarchive is refused and nothing is modified.
             </p>
           ) : danger && "restore" in danger ? (
             <p>

@@ -70,12 +70,14 @@ describe("DELETE / REBUILD FROM THIS POINT", () => {
     expect(h.state.archive[0]?.branches.map((b) => b.code)).toEqual(["A1"]);
     h.expectValid();
 
-    // Rebuild: the next round is R3 again and P1 can happen again, recreating A1.
+    // Rebuild: the next round is R3 again and P1 can happen again — the new child is A2,
+    // never A1 again (A1 stays reserved by the archived branch).
     const { bet } = createTicket(h.state, ticketInput(a.id, 16_900, 13_000), h.ctx());
     expect(bet.roundNumber).toBe(3);
     settleTicket(h.state, { betId: bet.id, result: "WON" }, h.ctx());
     h.play(a.id, 13_000, "WON");
-    expect(h.branch("A1").currentCapitalCents).toBe(10_000);
+    expect(h.branch("A2").currentCapitalCents).toBe(10_000);
+    expect(h.state.branches.some((b) => b.code === "A1")).toBe(false);
     h.expectValid();
   });
 

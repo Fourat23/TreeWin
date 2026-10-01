@@ -36,8 +36,9 @@ import {
  *                      change, and everything after it on its branch
  *   DELETE_BRANCH      remove a root branch with its entire subtree
  *
- * Mode ARCHIVE (default) moves the removed records to `state.archive`; PURGE drops them.
- * Every correction runs after an automatic snapshot, so it can be undone.
+ * Mode ARCHIVE (default) moves the removed records to `state.archive` (restorable with
+ * Unarchive, see unarchive-service); PURGE drops them. Every correction runs after an automatic
+ * snapshot, so it can be undone.
  */
 
 export const DELETE_MODES = ["ARCHIVE", "PURGE"] as const;
@@ -261,10 +262,10 @@ function buildPlan(
           "Only manual adjustments, manual BANK transfers and profile/status changes can be deleted from the event log. Correct tickets from the ticket itself.",
         );
       }
-      if (event.type === "MANUAL_ADJUSTMENT" && event.metadata?.kind === "CORRECTION") {
+      if (event.type === "MANUAL_ADJUSTMENT" && event.metadata?.kind !== "CAPITAL_CORRECTION") {
         throw new DomainError(
           "INVALID_STATE",
-          "Correction journal entries cannot be deleted — use Undo instead",
+          "Correction / unarchive journal entries cannot be deleted — use Undo instead",
         );
       }
       const plan = emptyPlan(
@@ -359,6 +360,8 @@ function applyPlan(
   let unlinkedCandidates = 0;
   for (const c of state.candidates) {
     if (c.convertedBetId && plan.removedBetIds.has(c.convertedBetId)) {
+      // Keep the link in the archive so an unarchive can restore it.
+      archive.candidates.push(structuredClone(c));
       c.convertedBetId = null;
       c.updatedAt = now;
       unlinkedCandidates += 1;

@@ -243,6 +243,7 @@ export function migrateLegacyBackup(
     branchEvents: events,
     candidates: legacy.candidates as unknown as WorkspaceState["candidates"],
     archive: [],
+    auditLog: [],
     metadata: {
       createdAt: now.getTime(),
       nextEventId: Math.max(0, ...events.map((e) => Number(e.id) || 0)) + 1,
@@ -250,6 +251,7 @@ export function migrateLegacyBackup(
       mutationCount: 0,
       demoSeed: looksLikeDemo ? { seededAt: now.getTime() } : null,
       lastChange: null,
+      reservedCodes: [],
     },
   };
   const valid = workspaceStateSchema.safeParse(state);

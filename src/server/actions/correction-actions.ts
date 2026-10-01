@@ -11,6 +11,11 @@ import {
   type CorrectionTarget,
   type DeleteMode,
 } from "../services/correction-service";
+import {
+  unarchiveCandidate,
+  unarchiveEntry,
+  type UnarchiveResult,
+} from "../services/unarchive-service";
 import type { ActionResult } from "./result";
 import { mutateAction, readAction } from "./workspace-op";
 
@@ -55,5 +60,28 @@ export async function purgeArchiveEntryAction(
     workspace,
     (state) => `Permanently deleted archived records: ${purgeArchiveEntry(state, input).label}`,
     (label) => label,
+  );
+}
+
+/** Restore an archived correction (snapshot first, journaled, refused on any conflict). */
+export async function unarchiveEntryAction(
+  workspace: string,
+  input: { archiveId: string },
+): Promise<ActionResult<UnarchiveResult>> {
+  return mutateAction(
+    workspace,
+    (state, ctx) => unarchiveEntry(state, input, ctx),
+    (r) => `Unarchived: ${r.label}`,
+  );
+}
+
+export async function unarchiveCandidateAction(
+  workspace: string,
+  input: { id: string },
+): Promise<ActionResult<string>> {
+  return mutateAction(
+    workspace,
+    (state, ctx) => unarchiveCandidate(state, input, ctx),
+    (eventName) => `Unarchived candidate ${eventName}`,
   );
 }

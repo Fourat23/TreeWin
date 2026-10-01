@@ -79,6 +79,10 @@ export async function transferToBankAction(
 export async function updateBranchNotesAction(
   workspace: string,
   input: { branchId: string; notes: string },
-): Promise<ActionResult> {
-  return mutateAction(workspace, (state, ctx) => updateBranchNotes(state, input, ctx));
+): Promise<ActionResult<{ code: string }>> {
+  return mutateAction(
+    workspace,
+    (state, ctx) => ({ code: updateBranchNotes(state, input, ctx).code }),
+    (r) => `Edited notes of ${r.code}`,
+  );
 }

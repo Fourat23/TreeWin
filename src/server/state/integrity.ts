@@ -29,6 +29,7 @@ export function createEmptyState(
     branchEvents: [],
     candidates: [],
     archive: [],
+    auditLog: [],
     metadata: {
       createdAt: now.getTime(),
       nextEventId: 1,
@@ -36,6 +37,7 @@ export function createEmptyState(
       mutationCount: 0,
       demoSeed: null,
       lastChange: null,
+      reservedCodes: [],
     },
   };
 }
@@ -72,7 +74,7 @@ function checkState(
         .map((i) => `${i.path.join(".")}: ${i.message}`),
     };
   }
-  const state = parsed.data;
+  const state = reserveExistingCodes(parsed.data);
   const problems: string[] = [];
   const add = (message: string) => {
     if (problems.length < MAX_PROBLEMS) problems.push(message);
@@ -206,6 +208,20 @@ function checkState(
     if (c.convertedBetId && !bets.has(c.convertedBetId)) add(`Candidate ${c.id}: ticket missing`);
   }
   return { state, problems };
+}
+
+/**
+ * Make sure every branch code present in the file (live or archived) is in the registry of
+ * reserved codes. Files written before the registry existed are upgraded transparently.
+ */
+function reserveExistingCodes(state: WorkspaceState): WorkspaceState {
+  const reserved = new Set(state.metadata.reservedCodes);
+  const missing = [
+    ...state.branches.map((b) => b.code),
+    ...state.archive.flatMap((a) => a.branches.map((b) => b.code)),
+  ].filter((code) => !reserved.has(code) && reserved.add(code));
+  if (missing.length === 0 && reserved.size === state.metadata.reservedCodes.length) return state;
+  return { ...state, metadata: { ...state.metadata, reservedCodes: [...reserved] } };
 }
 
 /** Validate and return the parsed state, or throw with every problem found. */

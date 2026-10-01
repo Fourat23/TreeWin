@@ -1,8 +1,8 @@
 "use client";
 
-import { ArrowDownToLine, Download, ShieldCheck, Undo2, X } from "lucide-react";
+import { ArrowDownToLine, CalendarDays, Download, ShieldCheck, Undo2, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { BANK_DESTINATIONS, BANK_STATUSES, PROFILES, type BankDestination } from "@/domain/types";
 import { MoneyAreaChart } from "@/components/charts/time-charts";
@@ -12,16 +12,20 @@ import { AnimatedNumber } from "@/components/ui/animated-number";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
+import { Dialog } from "@/components/ui/dialog";
 import { ProfileDot } from "@/components/ui/domain-badges";
-import { Input, Select } from "@/components/ui/field";
+import { Field, Input, Select } from "@/components/ui/field";
 import { EmptyState } from "@/components/ui/misc";
 import { DESTINATION_LABEL, HARVEST_LABEL, PROFILE_COLOR_VAR, PROFILE_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/cn";
+import { todayIso } from "@/lib/dates";
 import { withWorkspace } from "@/lib/workspace";
 import type { BankDTO, BankFilters } from "@/server/queries/bank";
+import type { BankTransactionDTO } from "@/server/queries/dto";
 import {
   markWithdrawnAction,
   setBankDestinationAction,
+  setWithdrawalDateAction,
   undoWithdrawnAction,
 } from "@/server/actions/bank-actions";
 
@@ -60,17 +64,16 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
       } else toast.error(result.message);
     });
 
-  const setWithdrawn = (transactionIds: string[], withdrawn: boolean) =>
+  const [withdrawal, setWithdrawal] = useState<{
+    mode: "mark" | "date";
+    rows: BankTransactionDTO[];
+  } | null>(null);
+
+  const undoWithdrawn = (transactionIds: string[]) =>
     startTransition(async () => {
-      const result = withdrawn
-        ? await markWithdrawnAction(workspace, { transactionIds })
-        : await undoWithdrawnAction(workspace, { transactionIds });
+      const result = await undoWithdrawnAction(workspace, { transactionIds });
       if (result.ok) {
-        toast.success(
-          withdrawn
-            ? `${result.data} entr${result.data === 1 ? "y" : "ies"} marked as withdrawn from Winamax`
-            : "Withdrawal undone — the money is SECURED (still never playable)",
-        );
+        toast.success("Withdrawal undone — the money is SECURED (still never playable)");
         notifyMutation();
       } else toast.error(result.message);
     });
@@ -304,19 +307,7 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
                 <Button
                   size="sm"
                   disabled={pending}
-                  onClick={() => {
-                    const total = awaiting.reduce((sum, t) => sum + t.amountCents, 0);
-                    if (
-                      window.confirm(
-                        `Mark ${awaiting.length} SECURED entr${awaiting.length === 1 ? "y" : "ies"} (${f.money(total)}) as withdrawn from Winamax today?`,
-                      )
-                    ) {
-                      setWithdrawn(
-                        awaiting.map((t) => t.id),
-                        true,
-                      );
-                    }
-                  }}
+                  onClick={() => setWithdrawal({ mode: "mark", rows: awaiting })}
                 >
                   <ArrowDownToLine /> Mark {filtered ? "filtered" : "all"} as withdrawn
                 </Button>
@@ -344,7 +335,7 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
                   <span className="w-28 num text-base font-semibold">
                     {f.money(t.amountCents, { signed: true })}
                   </span>
-                  <div className="min-w-0 flex-1 text-sm">
+                  <div className="min-w-48 flex-1 text-sm">
                     <p className="flex flex-wrap items-center gap-2">
                       <Badge
                         tone={
@@ -366,45 +357,58 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
                     <p className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
                       {f.dateTime(t.createdAt)}
                       {t.status === "WITHDRAWN" ? (
-                        <Badge tone="good">
-                          WITHDRAWN{t.withdrawnAt ? ` · ${f.date(t.withdrawnAt)}` : ""}
+                        <Badge tone="good" data-testid="withdrawn-badge">
+                          WITHDRAWN{t.withdrawnAt ? ` on ${f.date(t.withdrawnAt)}` : ""}
                         </Badge>
                       ) : (
                         <Badge tone="warning">SECURED · on Winamax</Badge>
                       )}
                     </p>
                   </div>
-                  {t.status === "SECURED" ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={pending}
-                      onClick={() => setWithdrawn([t.id], true)}
+                  <div className="ml-auto flex flex-wrap items-center gap-1">
+                    {t.status === "SECURED" ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={pending}
+                        onClick={() => setWithdrawal({ mode: "mark", rows: [t] })}
+                      >
+                        <ArrowDownToLine /> Mark as withdrawn
+                      </Button>
+                    ) : (
+                      <span className="flex gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={pending}
+                          onClick={() => setWithdrawal({ mode: "date", rows: [t] })}
+                          aria-label={`Change the withdrawal date of the ${t.branchCode} entry`}
+                        >
+                          <CalendarDays /> Date
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={pending}
+                          onClick={() => undoWithdrawn([t.id])}
+                        >
+                          <Undo2 /> Undo withdrawn
+                        </Button>
+                      </span>
+                    )}
+                    <Select
+                      aria-label={`Destination of ${t.branchCode} transfer`}
+                      className="h-8 w-36 text-xs"
+                      value={t.destination}
+                      onChange={(e) => setDestination(t.id, e.target.value as BankDestination)}
                     >
-                      <ArrowDownToLine /> Mark as withdrawn
-                    </Button>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={pending}
-                      onClick={() => setWithdrawn([t.id], false)}
-                    >
-                      <Undo2 /> Undo withdrawn
-                    </Button>
-                  )}
-                  <Select
-                    aria-label={`Destination of ${t.branchCode} transfer`}
-                    className="h-8 w-36 text-xs"
-                    value={t.destination}
-                    onChange={(e) => setDestination(t.id, e.target.value as BankDestination)}
-                  >
-                    {BANK_DESTINATIONS.map((d) => (
-                      <option key={d} value={d}>
-                        {DESTINATION_LABEL[d]}
-                      </option>
-                    ))}
-                  </Select>
+                      {BANK_DESTINATIONS.map((d) => (
+                        <option key={d} value={d}>
+                          {DESTINATION_LABEL[d]}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
                 </li>
               ))}
             </ol>
@@ -445,6 +449,145 @@ export function BankView({ data, filters }: { data: BankDTO; filters: BankFilter
           </CardBody>
         </Card>
       </div>
+      {withdrawal ? (
+        <WithdrawalDialog
+          key={`${withdrawal.mode}-${withdrawal.rows.map((r) => r.id).join(",")}`}
+          mode={withdrawal.mode}
+          rows={withdrawal.rows}
+          onClose={() => setWithdrawal(null)}
+        />
+      ) : null}
     </div>
   );
+}
+
+/**
+ * "Mark as withdrawn" / "Change withdrawal date": the withdrawal day defaults to today, may be
+ * any past day since the money was secured, never a future day.
+ */
+function WithdrawalDialog({
+  mode,
+  rows,
+  onClose,
+}: {
+  mode: "mark" | "date";
+  rows: BankTransactionDTO[];
+  onClose: () => void;
+}) {
+  const f = useFormat();
+  const { workspace, notifyMutation } = useUi();
+  const today = todayIso();
+  const initial = mode === "date" && rows[0]?.withdrawnAt ? isoDay(rows[0].withdrawnAt) : today;
+  const [day, setDay] = useState(initial);
+  const [destination, setDestination] = useState<BankDestination | "">("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+  const earliest = rows.reduce((min, t) => Math.min(min, t.createdAt), Infinity);
+  const minDay = Number.isFinite(earliest) ? isoDay(earliest) : undefined;
+  const total = rows.reduce((s, t) => s + t.amountCents, 0);
+
+  const submit = () => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return setError("Choose a valid date");
+    if (day > today) return setError("The withdrawal date cannot be in the future");
+    if (minDay && day < minDay)
+      return setError("The withdrawal date cannot be before the money was secured");
+    startTransition(async () => {
+      const ids = rows.map((r) => r.id);
+      const result =
+        mode === "mark"
+          ? await markWithdrawnAction(workspace, {
+              transactionIds: ids,
+              withdrawnOn: day,
+              destination: destination || undefined,
+            })
+          : await setWithdrawalDateAction(workspace, { transactionIds: ids, withdrawnOn: day });
+      if (!result.ok) {
+        setError(result.message);
+        return;
+      }
+      toast.success(
+        mode === "mark"
+          ? `${result.data} entr${result.data === 1 ? "y" : "ies"} marked as withdrawn on ${f.day(day)}`
+          : `Withdrawal date set to ${f.day(day)}`,
+      );
+      notifyMutation();
+      onClose();
+    });
+  };
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => (!open ? onClose() : undefined)}
+      title={mode === "mark" ? "Mark as withdrawn" : "Change withdrawal date"}
+      description={`${rows.length} BANK entr${rows.length === 1 ? "y" : "ies"} · ${f.money(total)}`}
+      size="sm"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            onClick={submit}
+            disabled={pending}
+            data-testid="confirm-withdrawal"
+          >
+            {mode === "mark" ? "Mark as withdrawn" : "Save date"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <Field
+          label="Withdrawal date"
+          error={error}
+          hint="Defaults to today. A past date is fine; a future date is not."
+        >
+          {(p) => (
+            <Input
+              {...p}
+              type="date"
+              value={day}
+              max={today}
+              min={minDay}
+              onChange={(e) => {
+                setDay(e.target.value);
+                setError(null);
+              }}
+              data-testid="withdrawal-date"
+            />
+          )}
+        </Field>
+        {mode === "mark" ? (
+          <Field label="Destination (optional)">
+            {(p) => (
+              <Select
+                {...p}
+                value={destination}
+                onChange={(e) => setDestination(e.target.value as BankDestination | "")}
+              >
+                <option value="">Keep current destination</option>
+                {BANK_DESTINATIONS.map((d) => (
+                  <option key={d} value={d}>
+                    {DESTINATION_LABEL[d]}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        ) : null}
+        <p className="text-xs text-fg-subtle">
+          WITHDRAWN only records that the money left Winamax; it never returns to a branch. The
+          change is snapshotted first and can be undone.
+        </p>
+      </div>
+    </Dialog>
+  );
+}
+
+/** Local calendar day (YYYY-MM-DD) of a timestamp. */
+function isoDay(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }

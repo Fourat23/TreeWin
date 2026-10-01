@@ -216,10 +216,19 @@ export const lastChangeSchema = z
     /** Snapshot taken immediately before the change — restoring it undoes the change. */
     backupId: z.string(),
     at: ms,
-    /** Mutation counter right after the change (later mutations are also undone). */
+    /** Mutation counter right after the change. */
     mutationCount: int.min(0),
   })
   .strict();
+
+/** One line of the workspace change log (every persisted mutation, undo and restore). */
+export const auditEntrySchema = z
+  .object({
+    at: ms,
+    label: z.string(),
+  })
+  .strict();
+export const AUDIT_LOG_LIMIT = 500;
 
 export const workspaceStateSchema = z
   .object({
@@ -236,6 +245,8 @@ export const workspaceStateSchema = z
     branchEvents: z.array(branchEventRecordSchema),
     candidates: z.array(candidateRecordSchema),
     archive: z.array(archiveEntrySchema),
+    /** Change log, newest last (bounded to the last AUDIT_LOG_LIMIT entries). */
+    auditLog: z.array(auditEntrySchema).default([]),
     metadata: z
       .object({
         createdAt: ms,
@@ -245,6 +256,11 @@ export const workspaceStateSchema = z
         /** Present only in DEMO: marks seeded demonstration data. Forbidden in REAL. */
         demoSeed: z.object({ seededAt: ms }).strict().nullable(),
         lastChange: lastChangeSchema.nullable(),
+        /**
+         * Every branch code ever assigned in this workspace (tombstones included): archived,
+         * corrected away or purged branches keep their code reserved forever.
+         */
+        reservedCodes: z.array(z.string().min(1).max(64)).default([]),
       })
       .strict(),
   })
@@ -258,6 +274,7 @@ export type BranchEventRecord = z.infer<typeof branchEventRecordSchema>;
 export type CandidateRecord = z.infer<typeof candidateRecordSchema>;
 export type ArchiveEntry = z.infer<typeof archiveEntrySchema>;
 export type LastChange = z.infer<typeof lastChangeSchema>;
+export type AuditEntry = z.infer<typeof auditEntrySchema>;
 
 export const BACKUP_FORMAT = "celltree-backup";
 export const BACKUP_KINDS = ["AUTO", "MANUAL", "EXPORT"] as const;

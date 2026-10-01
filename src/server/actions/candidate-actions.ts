@@ -11,13 +11,24 @@ import { mutateAction } from "./workspace-op";
 export async function createCandidateAction(
   workspace: string,
   input: CandidateInput,
-): Promise<ActionResult<{ id: string }>> {
-  return mutateAction(workspace, (state, ctx) => ({ id: createCandidate(state, input, ctx).id }));
+): Promise<ActionResult<{ id: string; eventName: string }>> {
+  return mutateAction(
+    workspace,
+    (state, ctx) => {
+      const candidate = createCandidate(state, input, ctx);
+      return { id: candidate.id, eventName: candidate.eventName };
+    },
+    (r) => `Added candidate ${r.eventName}`,
+  );
 }
 
 export async function updateCandidateAction(
   workspace: string,
   input: Partial<CandidateInput> & { id: string },
-): Promise<ActionResult> {
-  return mutateAction(workspace, (state, ctx) => void updateCandidate(state, input, ctx));
+): Promise<ActionResult<{ eventName: string }>> {
+  return mutateAction(
+    workspace,
+    (state, ctx) => ({ eventName: updateCandidate(state, input, ctx).eventName }),
+    (r) => `Edited candidate ${r.eventName}`,
+  );
 }

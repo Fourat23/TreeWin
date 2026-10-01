@@ -82,18 +82,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
                   },
                 },
               }}
-              lastChange={
-                change
-                  ? {
-                      label: change.label,
-                      at: change.at,
-                      laterChanges: Math.max(
-                        0,
-                        state.metadata.mutationCount - change.mutationCount,
-                      ),
-                    }
-                  : null
-              }
+              lastChange={change ? { label: change.label, at: change.at } : null}
             >
               <AppShell initialTheme={theme}>
                 {loadError ? (

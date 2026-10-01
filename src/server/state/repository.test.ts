@@ -3,10 +3,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "@/domain/strategy/settings";
-import { createRootBranch } from "../services/branch-service";
+import { markWithdrawn, setBankDestination, undoWithdrawn } from "../services/bank-service";
+import {
+  changeBranchProfile,
+  createRootBranch,
+  transferToBank,
+  updateBranchNotes,
+} from "../services/branch-service";
+import {
+  archiveCandidate,
+  createCandidate,
+  updateCandidate,
+  type CandidateInput,
+} from "../services/candidate-service";
+import { saveSettings } from "../services/settings-service";
+import { unarchiveCandidate } from "../services/unarchive-service";
 import { buildDemoState } from "../services/demo-seed";
 import { StateIntegrityError } from "./integrity";
-import { FileStateRepository, StateLoadError } from "./repository";
+import { FileStateRepository, StateLoadError, type MutationContext } from "./repository";
+import type { WorkspaceState } from "./schema";
+
+const candidateInput: CandidateInput = {
+  eventDate: "2026-10-04",
+  sport: "Football",
+  competition: "Ligue 1",
+  eventName: "Nice - Brest",
+  marketName: "1N2",
+  selection: "Nice",
+  oddsObservedBp: 12_500,
+  protocolStatus: "WATCH",
+};
 
 let dir: string;
 let repo: FileStateRepository;
@@ -62,11 +88,12 @@ describe("workspaces", () => {
     );
     const before = await read(repo.paths("REAL").state);
     const statBefore = await fs.stat(repo.paths("REAL").state);
+    const realBackups = await repo.listBackups("REAL");
     await repo.replace("DEMO", buildDemoState(new Date()).state, "Initialized DEMO data");
     await repo.replace("DEMO", buildDemoState(new Date()).state, "Reset DEMO data");
     expect(await read(repo.paths("REAL").state)).toBe(before);
     expect((await fs.stat(repo.paths("REAL").state)).mtimeMs).toBe(statBefore.mtimeMs);
-    expect(await repo.listBackups("REAL")).toEqual([]);
+    expect(await repo.listBackups("REAL")).toEqual(realBackups);
   });
 
   it("rejects a file that belongs to the other workspace", async () => {
@@ -105,17 +132,18 @@ describe("atomic persistence", () => {
       createRootBranch(s, { profile: "GROWTH", capitalCents: 5_000 }, ctx),
     );
     const before = await read(repo.paths("REAL").state);
+    const backupsBefore = await repo.listBackups("REAL");
     await expect(
       repo.mutate(
         "REAL",
         (s) => {
           (s.branches[0] as { currentCapitalCents: number }).currentCapitalCents = 999_999; // phantom money
         },
-        { undoable: "corrupt" },
+        { label: "corrupt" },
       ),
     ).rejects.toBeInstanceOf(StateIntegrityError);
     expect(await read(repo.paths("REAL").state)).toBe(before);
-    expect(await repo.listBackups("REAL")).toEqual([]);
+    expect(await repo.listBackups("REAL")).toEqual(backupsBefore);
   });
 
   it("a throwing operation leaves the state untouched", async () => {
@@ -156,46 +184,186 @@ describe("atomic persistence", () => {
 });
 
 describe("snapshots, restore & undo", () => {
-  it("snapshots before undoable changes and restores the previous state", async () => {
-    await repo.mutate("REAL", (s, ctx) =>
-      createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx),
-    );
-    await repo.mutate(
+  const codes = async (ws: "REAL" | "DEMO" = "REAL") =>
+    (await repo.load(ws)).branches.map((b) => b.code);
+  const notes = async () => (await repo.load("REAL")).branches.map((b) => b.notes);
+  const addRoot = (label: string) =>
+    repo.mutate(
       "REAL",
-      (s, ctx) => createRootBranch(s, { profile: "HARVEST", capitalCents: 2_000 }, ctx),
-      { undoable: "Created root branch B" },
+      (s, ctx) => createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx),
+      {
+        label,
+      },
     );
-    const state = await repo.load("REAL");
-    expect(state.metadata.lastChange?.label).toBe("Created root branch B");
-    const backups = await repo.listBackups("REAL");
-    expect(backups).toHaveLength(1);
-    expect(backups[0]).toMatchObject({ kind: "AUTO", reason: "Before: Created root branch B" });
+  const editNotes = (text: string) =>
+    repo.mutate(
+      "REAL",
+      (s, ctx) => updateBranchNotes(s, { branchId: s.branches[0]?.id ?? "", notes: text }, ctx),
+      { label: `Edited notes: ${text}` },
+    );
 
-    // Undo = restore the snapshot of the last change; the restore itself is undoable (redo).
-    await repo.restore(
-      "REAL",
-      state.metadata.lastChange?.backupId ?? "",
-      "Undo: Created root branch B",
+  it("every persisted mutation gets its own snapshot and becomes the last change", async () => {
+    await addRoot("Created A");
+    await editNotes("first");
+    const state = await repo.load("REAL");
+    expect(state.metadata.lastChange?.label).toBe("Edited notes: first");
+    const backups = await repo.listBackups("REAL");
+    expect(backups.map((b) => b.reason)).toEqual([
+      "Before: Edited notes: first",
+      "Before: Created A",
+    ]);
+    expect(state.auditLog.map((e) => e.label)).toEqual(["Created A", "Edited notes: first"]);
+  });
+
+  it("Undo after a major change then a small edit only reverts the small edit", async () => {
+    await addRoot("Created A");
+    await addRoot("Created B"); // major mutation A
+    await editNotes("typo"); // small edit B
+    expect(await repo.undo("REAL")).toBe("Edited notes: typo");
+    expect(await codes()).toEqual(["A", "B"]); // B's creation is kept
+    expect(await notes()).toEqual([null, null]); // only the note edit is gone
+    expect((await repo.load("REAL")).metadata.lastChange?.label).toBe("Created B");
+  });
+
+  it("repeated Undo reverses one mutation at a time", async () => {
+    await addRoot("Created A");
+    await editNotes("one");
+    await editNotes("two");
+    await editNotes("three");
+    expect(await notes()).toEqual(["three"]);
+    expect(await repo.undo("REAL")).toBe("Edited notes: three");
+    expect(await notes()).toEqual(["two"]);
+    expect(await repo.undo("REAL")).toBe("Edited notes: two");
+    expect(await notes()).toEqual(["one"]);
+    expect(await repo.undo("REAL")).toBe("Edited notes: one");
+    expect(await notes()).toEqual([null]);
+    expect(await repo.undo("REAL")).toBe("Created A");
+    expect(await codes()).toEqual([]);
+    expect(await repo.undo("REAL")).toBeNull();
+    const log = (await repo.load("REAL")).auditLog.map((e) => e.label);
+    expect(log.at(-1)).toBe("Undo: Created A");
+  });
+
+  it("every kind of mutation is an undo point, undone one step at a time", async () => {
+    const strip = (st: WorkspaceState) =>
+      JSON.stringify({ ...st, savedAt: null, auditLog: null, metadata: null });
+    const steps: [string, (s: WorkspaceState, ctx: MutationContext) => unknown][] = [
+      [
+        "create root",
+        (s, ctx) => createRootBranch(s, { profile: "BALANCED", capitalCents: 10_000 }, ctx),
+      ],
+      [
+        "branch notes",
+        (s, ctx) => updateBranchNotes(s, { branchId: s.branches[0]?.id ?? "", notes: "n" }, ctx),
+      ],
+      ["candidate", (s, ctx) => createCandidate(s, candidateInput, ctx)],
+      [
+        "candidate edit",
+        (s, ctx) => updateCandidate(s, { id: s.candidates[0]?.id ?? "", notes: "edited" }, ctx),
+      ],
+      ["candidate archive", (s, ctx) => archiveCandidate(s, s.candidates[0]?.id ?? "", ctx)],
+      [
+        "candidate unarchive",
+        (s, ctx) => unarchiveCandidate(s, { id: s.candidates[0]?.id ?? "" }, ctx),
+      ],
+      [
+        "manual BANK transfer",
+        (s, ctx) =>
+          transferToBank(
+            s,
+            { branchId: s.branches[0]?.id ?? "", amountCents: 500, reason: "secure" },
+            ctx,
+          ),
+      ],
+      [
+        "mark withdrawn",
+        (s, ctx) => markWithdrawn(s, { transactionIds: [s.bankTransactions[0]?.id ?? ""] }, ctx),
+      ],
+      [
+        "BANK destination",
+        (s) =>
+          setBankDestination(s, {
+            transactionIds: [s.bankTransactions[0]?.id ?? ""],
+            destination: "PEA",
+          }),
+      ],
+      [
+        "undo withdrawn",
+        (s) => undoWithdrawn(s, { transactionIds: [s.bankTransactions[0]?.id ?? ""] }),
+      ],
+      ["settings", (s, ctx) => saveSettings(s, { ...s.settings, roundLabel: "Tour" }, ctx)],
+      [
+        "profile change",
+        (s, ctx) =>
+          changeBranchProfile(
+            s,
+            { branchId: s.branches[0]?.id ?? "", profile: "GROWTH", reason: "test" },
+            ctx,
+          ),
+      ],
+    ];
+    const before: string[] = [];
+    for (const [label, fn] of steps) {
+      before.push(strip(await repo.load("REAL")));
+      await repo.mutate("REAL", fn, { label });
+    }
+    expect((await repo.load("REAL")).auditLog.map((e) => e.label)).toEqual(steps.map(([l]) => l));
+    for (const [label] of [...steps].reverse()) {
+      expect(await repo.undo("REAL")).toBe(label);
+      expect(strip(await repo.load("REAL"))).toBe(before.pop());
+    }
+    expect(await repo.undo("REAL")).toBeNull();
+  });
+
+  it("an undone state stays recoverable from the backup history", async () => {
+    await addRoot("Created A");
+    await editNotes("keep me");
+    await repo.undo("REAL");
+    const safety = (await repo.listBackups("REAL")).find(
+      (b) => b.reason === "Before undo: Edited notes: keep me",
     );
-    const undone = await repo.load("REAL");
-    expect(undone.branches.map((b) => b.code)).toEqual(["A"]);
-    expect(undone.metadata.lastChange?.label).toBe("Undo: Created root branch B");
-    await repo.restore("REAL", undone.metadata.lastChange?.backupId ?? "");
-    expect((await repo.load("REAL")).branches.map((b) => b.code)).toEqual(["A", "B"]);
+    expect(safety).toBeDefined();
+    await repo.restore("REAL", safety?.id ?? "");
+    expect(await notes()).toEqual(["keep me"]);
+    // A restore is itself a change: Undo goes back to the state before the restore.
+    await repo.undo("REAL");
+    expect(await notes()).toEqual([null]);
+  });
+
+  it("Undo in one workspace never touches the other", async () => {
+    await addRoot("Created A");
+    await repo.replace("DEMO", buildDemoState(new Date()).state, "Initialized DEMO data");
+    await repo.mutate(
+      "DEMO",
+      (s, ctx) => updateBranchNotes(s, { branchId: s.branches[0]?.id ?? "", notes: "demo" }, ctx),
+      {
+        label: "Demo note",
+      },
+    );
+    const realBefore = await read(repo.paths("REAL").state);
+    expect(await repo.undo("DEMO")).toBe("Demo note");
+    expect(await repo.undo("DEMO")).toBe("Initialized DEMO data");
+    expect(await codes("DEMO")).toEqual([]);
+    expect(await read(repo.paths("REAL").state)).toBe(realBefore);
+    expect(await codes("REAL")).toEqual(["A"]);
   });
 
   it("keeps only the newest automatic snapshots; manual backups are never deleted", async () => {
-    await repo.mutate("REAL", (s, ctx) => {
-      s.settings = { ...DEFAULT_SETTINGS, backups: { keepAutomatic: 3 } };
-      createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx);
-    });
+    await repo.mutate(
+      "REAL",
+      (s, ctx) => {
+        s.settings = { ...DEFAULT_SETTINGS, backups: { keepAutomatic: 3 } };
+        createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx);
+      },
+      { label: "setup" },
+    );
     const manual = await repo.backup("REAL", "Before the season", "MANUAL");
-    let t = Date.parse("2026-10-01T10:00:00.000Z");
+    let t = Date.now();
     for (let i = 0; i < 6; i += 1) {
       await repo.mutate(
         "REAL",
         (s, ctx) => createRootBranch(s, { profile: "HARVEST", capitalCents: 1_000 }, ctx),
-        { undoable: `change ${i}`, now: new Date((t += 1_000)) },
+        { label: `change ${i}`, now: new Date((t += 1_000)) },
       );
     }
     const backups = await repo.listBackups("REAL");

@@ -47,8 +47,10 @@ sans jamais disparaître de l'historique.
 - **Deux espaces isolés : REAL et DEMO.** REAL démarre vide et n'est jamais pré-rempli ; DEMO contient le jeu de
   démonstration et peut être réinitialisé à volonté. Un sélecteur permanent, un badge `REAL DATA` et un bandeau
   `DEMO / SIMULATION DATA` indiquent en permanence quelles données sont affichées.
-- **Snapshots automatiques** avant chaque changement annulable, historique des sauvegardes, **Undo** du dernier
-  changement (« Last change: … [Undo] »), restauration d'un snapshot quelconque.
+- **Chaque changement persisté a son snapshot** : historique des sauvegardes, journal des changements, **Undo**
+  qui remonte un changement à la fois (« Last change: … [Undo] »), restauration d'un snapshot quelconque.
+- **Codes de branche réservés à vie** (A, A1, A1.2…) : jamais réattribués, même après archivage, correction ou
+  suppression définitive. **Unarchive** remet des enregistrements archivés en place quand c'est sûr.
 - **Règles V1 appliquées strictement en REAL** : P1 à **2,80 × S**, mise = **tout le capital**, cote
   **≤ 1,30**, **une branche par match**, **un seul jalon post-P1 par round gagné**. En DEMO, chaque écart est
   possible mais explicite, journalisé et étiqueté _Outside V1_.
@@ -127,7 +129,9 @@ Format (`src/server/state/schema.ts`) :
   "settingsHistory": [ … ],     // versions précédentes des réglages
   "branches": [ … ], "bets": [ … ], "bankTransactions": [ … ], "branchEvents": [ … ], "candidates": [ … ],
   "archive": [ … ],             // enregistrements retirés par une correction (mode archive)
-  "metadata": { "createdAt", "nextEventId", "strategyRevision", "mutationCount", "demoSeed", "lastChange" }
+  "auditLog": [ … ],            // journal des changements (500 derniers)
+  "metadata": { "createdAt", "nextEventId", "strategyRevision", "mutationCount", "demoSeed", "lastChange",
+                "reservedCodes" } // tous les codes de branche déjà attribués (pierres tombales comprises)
 }
 ```
 
@@ -145,8 +149,8 @@ Cycle d'écriture (`FileStateRepository`, `src/server/state/repository.ts`) :
    **rejoués depuis le journal** (`replay.ts`), totaux BANK et enfants cohérents, aucune transaction BANK sans
    branche ni ticket (« BANK fantôme »), cohérence `WITHDRAWN` ↔ date de retrait, marqueur de démo interdit en
    REAL ;
-5. snapshot automatique éventuel de l'état précédent, puis écriture `state.tmp` → `fsync` → `rename` sur
-   `state.json`.
+5. **snapshot automatique de l'état précédent** (pour toute mutation, sans exception), ligne ajoutée au journal
+   des changements, puis écriture `state.tmp` → `fsync` → `rename` sur `state.json`.
 
 Un état invalide n'est **jamais** écrit : `state.json` reste intact. Un fichier corrompu au chargement n'est pas
 utilisé : l'interface affiche les problèmes détectés et propose de restaurer un snapshot (le fichier rejeté est
@@ -154,16 +158,20 @@ déplacé à côté, jamais supprimé).
 
 ## Sauvegardes, restauration, annulation
 
-- **Snapshots automatiques** dans `data/<workspace>/backups/AAAA-MM-JJTHH-mm-ss-SSS.json`, pris avant chaque
-  changement annulable (création, règlement, annulation, correction, ajustement, transfert, statut BANK,
-  réglages, import, reset, restauration). Seuls les **50 plus récents** sont conservés (réglable :
+- **Snapshots automatiques** dans `data/<workspace>/backups/AAAA-MM-JJTHH-mm-ss-SSS.json`, pris avant **chaque**
+  mutation persistée, centralement dans le dépôt (`FileStateRepository.commit`) : tickets, règlements,
+  corrections, suppressions, archivage/désarchivage, notes, candidats, profil, ajustements, statut/date/destination
+  BANK, réglages, import, resets, restaurations. Seuls les **50 plus récents** sont conservés (réglable :
   _Settings → Automatic snapshots kept_).
 - **Sauvegardes manuelles** (`…-manual.json`, avec note) : **jamais supprimées** par la rétention.
 - **Settings → Backups & snapshots** : historique (type, raison, date, taille), restauration de n'importe quel
   snapshot, **Restore previous snapshot**. Une restauration prend d'abord un snapshot de l'état courant : elle
   est elle-même annulable.
-- **Undo** : la barre supérieure affiche « Last change: … [Undo] ». Annuler restaure le snapshot pris juste avant
-  ce changement (les éventuels changements ultérieurs sont signalés avant confirmation).
+- **Undo** : la barre supérieure affiche « Last change: … [Undo] ». Undo signifie toujours « revenir à l'état
+  immédiatement avant le dernier changement persisté » ; l'état restauré garde son propre « dernier changement »,
+  donc des Undo successifs remontent **un changement à la fois**. L'état annulé reste récupérable dans
+  l'historique (« Before undo: … »).
+- **Journal des changements** (_Settings → Change log_) : chaque mutation, undo et restauration avec sa date.
 
 ## Règles V1 de la stratégie
 
@@ -228,9 +236,11 @@ mère 85,61 €.
 
 - Toute entrée BANK est d'abord **SECURED** : sortie définitive de l'écosystème, même si l'argent est encore sur
   le solde Winamax.
-- **Mark as withdrawn** (par entrée, ou en lot sur la liste filtrée ; la date du retrait est enregistrée) →
-  **WITHDRAWN** ; **Undo withdrawn** corrige une erreur ; **Set destination** (Livret A, PEA, CTO, autre —
-  informatif).
+- **Mark as withdrawn** (par entrée, ou en lot sur la liste filtrée) ouvre un dialogue : **date du retrait**
+  (aujourd'hui par défaut, une date passée est acceptée, une date future ou antérieure à la sécurisation est
+  refusée) et destination optionnelle → **WITHDRAWN** avec `withdrawnAt`. **Date** corrige la date d'une entrée
+  retirée ; **Undo withdrawn** corrige une erreur ; **Set destination** (Livret A, PEA, CTO, autre — informatif).
+  Chacune de ces actions est journalisée et annulable.
 - Le dashboard et la page BANK affichent **TOTAL SECURED**, **WITHDRAWN** et **AWAITING WITHDRAWAL**.
 - Aucune opération ne débite la BANK vers une branche ; ces statuts ne touchent jamais au capital des branches.
 
@@ -255,6 +265,20 @@ d'intégrité) → **snapshot automatique** → **confirmation explicite**.
 - **Mode** : **Archive** (défaut — les enregistrements sont retirés du registre et conservés dans `archive`) ou
   **suppression définitive** (taper le code de la branche ou `DELETE`). Les archives peuvent être purgées
   (`DELETE`). Toute correction est journalisée sur la branche reconstruite et annulable via Undo.
+- **Unarchive** (_Settings → Archived corrections_, _Candidates → Archived candidates_) : remet les enregistrements
+  archivés exactement comme ils étaient (une branche DEAD reste DEAD — mort et archivage sont distincts), sans
+  rien restaurer d'autre. Confirmation, snapshot préalable, ligne de journal (`UNARCHIVE`) et Undo possible. Le
+  désarchivage est **refusé avec un message clair** s'il n'est pas sûr : branche corrigée qui a un nouvel
+  historique depuis, ticket rouvert modifié, parent disparu, identifiants déjà présents, ou (en REAL) ticket en
+  attente qui violerait « une branche par match ». Rien n'est alors modifié.
+
+### Codes de branche
+
+Racines `A`, `B`, … `Z`, `AA` ; enfants `A1`, `A2` ; puis `A1.1`, `A1.2`. Un code attribué est **réservé à
+vie** : le registre `metadata.reservedCodes` garde chaque code, y compris ceux des branches archivées, retirées
+par une correction ou purgées définitivement. Avec `A1` et `A2`, si `A1` disparaît, le prochain enfant de `A`
+est `A3`, jamais `A1` ; avec `A2.1` et `A2.2`, si `A2.1` disparaît, le suivant est `A2.3`. Les UUID restent les
+identifiants internes. Le registre est conservé par un reset de REAL et fusionné lors d'un import.
 
 ## Versionnement de la stratégie
 
@@ -335,7 +359,8 @@ application du plan sur la copie → persistance tout-ou-rien.
 | `bankTransactions` | entrée BANK positive : branche, ticket, type, nature de récolte, profil d'origine, **statut SECURED/WITHDRAWN**, date de retrait, destination                                                                |
 | `branchEvents`     | journal ordonné (`id` = ordre global) : type, montant, delta de capital signé, capital et statut après, liens, métadonnées, description                                                                      |
 | `candidates`       | shadow portfolio (archivage possible)                                                                                                                                                                        |
-| `archive`          | lots d'enregistrements retirés par une correction en mode archive                                                                                                                                            |
+| `archive`          | lots d'enregistrements retirés par une correction en mode archive (restaurables avec Unarchive)                                                                                                              |
+| `auditLog`         | journal des changements persistés (date + libellé), 500 derniers                                                                                                                                             |
 
 ## Tests
 
@@ -343,7 +368,7 @@ application du plan sur la copie → persistance tout-ou-rien.
 npm run test
 ```
 
-175 tests (unitaires, services sur état en mémoire, dépôt de fichiers sur dossier temporaire, composants) :
+197 tests (unitaires, services sur état en mémoire, dépôt de fichiers sur dossier temporaire, composants) :
 
 - arithmétique monétaire exacte ; **P1 à 2,80 × S** ; acceptation 100 → 130 → 169 → 219,70 → 285,61 ⇒ BANK 100,
   enfant 100, mère 85,61 ; mort après perte totale ; un seul jalon par round ;
@@ -353,7 +378,12 @@ npm run test
   autre espace refusé, démo interdite dans REAL ;
 - **persistance atomique**, état invalide jamais écrit (et aucun snapshot orphelin), opérations concurrentes
   sérialisées ;
-- snapshots, rétention (manuels conservés), restauration, **Undo** (et annulation de l'undo) ;
+- snapshots, rétention (manuels conservés), restauration ; **chaque type de mutation est un point d'Undo**,
+  Undo après « changement majeur puis petite édition » n'annule que la petite édition, Undo répétés un par un,
+  isolation REAL/DEMO de l'Undo ;
+- **codes jamais réutilisés** après archivage, correction, réouverture, purge (racines et enfants imbriqués) ;
+- **Unarchive** (sous-arbre racine, correction « delete from here », lien candidat, candidat) et refus sûrs en
+  cas de conflit ; date de retrait (aujourd'hui, passée, future refusée, correction, undo withdrawn) ;
 - BANK SECURED ↔ WITHDRAWN sans effet sur les branches, montants négatifs rejetés ;
 - corrections en cascade (reopen, delete from here, événement manuel, racine), absence d'orphelins et de BANK
   fantôme, archive vs purge et confirmations tapées ;
@@ -373,7 +403,8 @@ npm run test
 
 - Application mono-utilisateur locale : la file de mutations est en mémoire dans le processus Next ; ne pas
   lancer deux serveurs sur le même dossier de données.
-- Les archives de corrections se consultent dans _Settings_ ; les remettre en place passe par Undo ou la
-  restauration d'un snapshot.
+- Unarchive d'une correction « delete from here » n'est possible que si la branche corrigée n'a rien enregistré
+  depuis ; sinon, passer par Undo ou la restauration d'un snapshot.
+- La profondeur de l'Undo est bornée par la rétention des snapshots automatiques (50 par défaut).
 - **Voyage dans le temps** : capital et statut rejoués ; les totaux BANK/enfants des nœuds ne sont pas historisés.
 - Capture d'écran de ticket : champ prévu, upload non implémenté. La devise est un paramètre d'affichage.

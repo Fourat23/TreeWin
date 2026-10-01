@@ -69,6 +69,11 @@ export interface EngineContext {
   random?: () => number;
   /** Skip human-readable descriptions (Monte Carlo runs evaluate millions of rounds). */
   quiet?: boolean;
+  /**
+   * Rank of the first child this settlement may create. The ledger passes the next rank not yet
+   * reserved by any code ever assigned, so codes are never reused. Defaults to childCount + 1.
+   */
+  firstChildRank?: number;
 }
 
 export interface PlannedEvent {
@@ -272,7 +277,8 @@ class PlanBuilder {
     if (childCents > 0) {
       childIndex = this.children.length;
       const profile = this.nextChildProfile();
-      const code = childCode(this.branch.code, this.branch.childCount + childIndex + 1);
+      const firstRank = this.ctx.firstChildRank ?? this.branch.childCount + 1;
+      const code = childCode(this.branch.code, firstRank + childIndex);
       this.children.push({ code, profile, capitalCents: childCents, reason: input.kind });
       this.push({
         type: "CHILD_CREATED",

@@ -7,10 +7,12 @@ import {
   type CreateTicketInput,
   type UpdateTicketDetailsInput,
 } from "@/domain/bets/tickets";
+import { nextChildRank } from "@/domain/branches/codes";
 import { calculateReturn, formatOdds } from "@/domain/money";
 import { EngineError, evaluateSettlement, type SettlementPlan } from "@/domain/strategy/engine";
 import { isPlayable, PROFILES, SETTLE_RESULTS } from "@/domain/types";
 import type { BetRecord, BranchRecord, WorkspaceState } from "../state/schema";
+import { reservedBranchCodes, reserveBranchCode } from "./branch-service";
 import { DomainError } from "./errors";
 import {
   automaticProfileCounts,
@@ -284,7 +286,15 @@ export function previewSettlement(
       { roundNumber: bet.roundNumber, stakeCents: bet.stakeCents, oddsBp: bet.oddsBp },
       data.result,
       state.settings,
-      { profileCounts: automaticProfileCounts(state), childProfileOverrides: data.childProfiles },
+      {
+        profileCounts: automaticProfileCounts(state),
+        childProfileOverrides: data.childProfiles,
+        // Codes are never reused: start after every rank ever reserved for this parent.
+        firstChildRank: Math.max(
+          branch.childCount + 1,
+          nextChildRank(branch.code, reservedBranchCodes(state)),
+        ),
+      },
     );
     return { bet, branch, plan };
   } catch (error) {
@@ -357,6 +367,7 @@ export function settleTicket(
       notes: null,
       ...stamp,
     };
+    reserveBranchCode(state, record.code);
     state.branches.push(record);
     return record;
   });

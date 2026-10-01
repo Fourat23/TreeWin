@@ -4,7 +4,13 @@ import { DEFAULT_SETTINGS } from "@/domain/strategy/settings";
 import { getDashboard } from "../queries/overview";
 import { getTreeHistory, listBranchSummaries } from "../queries/branches";
 import { createEmptyState, findIntegrityProblems } from "../state/integrity";
-import { bankStatusTotals, markWithdrawn, setBankDestination, undoWithdrawn } from "./bank-service";
+import {
+  bankStatusTotals,
+  markWithdrawn,
+  setBankDestination,
+  setWithdrawalDate,
+  undoWithdrawn,
+} from "./bank-service";
 import {
   cancelPendingTicket,
   checkTicketConflicts,
@@ -492,6 +498,72 @@ describe("BANK statuses", () => {
     expect(findIntegrityProblems(inconsistent, "REAL").join(" ")).toMatch(
       /inconsistent withdrawal/,
     );
+  });
+});
+
+describe("withdrawal date", () => {
+  const securedEntry = () => {
+    const h = workspaceHarness("REAL");
+    const a = createRootBranch(h.state, { profile: "HARVEST", capitalCents: 10_000 }, h.ctx());
+    transferToBank(h.state, { branchId: a.id, amountCents: 1_000, reason: "secure" }, h.ctx());
+    const tx = h.state.bankTransactions[0];
+    if (!tx) throw new Error("missing");
+    return { h, tx, a };
+  };
+  const day = (ms: number) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  it("defaults to today", () => {
+    const { h, tx } = securedEntry();
+    const ctx = h.ctx();
+    markWithdrawn(h.state, { transactionIds: [tx.id] }, ctx);
+    expect(tx.withdrawnAt).toBe(ctx.now.getTime());
+    h.expectValid();
+  });
+
+  it("accepts a past date (stored as that local day) and rejects a future one", () => {
+    const { h, tx } = securedEntry();
+    // The harness clock is 2026-10-01; the money was secured that day.
+    const ctx = { ...h.ctx(), now: new Date(2026, 9, 20, 18) };
+    markWithdrawn(h.state, { transactionIds: [tx.id], withdrawnOn: "2026-10-05" }, ctx);
+    expect(day(tx.withdrawnAt ?? 0)).toBe("2026-10-05");
+    undoWithdrawn(h.state, { transactionIds: [tx.id] });
+    expect(tx).toMatchObject({ status: "SECURED", withdrawnAt: null });
+    expectDomainError(
+      () => markWithdrawn(h.state, { transactionIds: [tx.id], withdrawnOn: "2026-10-21" }, ctx),
+      "VALIDATION",
+    );
+    expectDomainError(
+      () => markWithdrawn(h.state, { transactionIds: [tx.id], withdrawnOn: "2026-02-30" }, ctx),
+      "VALIDATION",
+    );
+    expectDomainError(
+      () => markWithdrawn(h.state, { transactionIds: [tx.id], withdrawnOn: "2026-09-01" }, ctx),
+      "VALIDATION",
+    );
+    expect(tx.status).toBe("SECURED");
+    h.expectValid();
+  });
+
+  it("the withdrawal date of a WITHDRAWN entry can be corrected", () => {
+    const { h, tx, a } = securedEntry();
+    const ctx = { ...h.ctx(), now: new Date(2026, 9, 20, 18) };
+    markWithdrawn(h.state, { transactionIds: [tx.id] }, ctx);
+    setWithdrawalDate(h.state, { transactionIds: [tx.id], withdrawnOn: "2026-10-03" }, ctx);
+    expect(day(tx.withdrawnAt ?? 0)).toBe("2026-10-03");
+    expectDomainError(
+      () => setWithdrawalDate(h.state, { transactionIds: [tx.id], withdrawnOn: "2026-10-25" }, ctx),
+      "VALIDATION",
+    );
+    undoWithdrawn(h.state, { transactionIds: [tx.id] });
+    expectDomainError(
+      () => setWithdrawalDate(h.state, { transactionIds: [tx.id], withdrawnOn: "2026-10-03" }, ctx),
+      "INVALID_STATE",
+    );
+    expect(h.branch(a.code).currentCapitalCents).toBe(9_000);
+    h.expectValid();
   });
 });
 

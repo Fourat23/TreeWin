@@ -1,6 +1,6 @@
 "use client";
 
-import { Archive, Pencil, Plus, Ticket, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Pencil, Plus, Ticket, Trash2 } from "lucide-react";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { formatOdds, parseOdds } from "@/domain/money";
@@ -26,7 +26,10 @@ import { EmptyState, Segmented } from "@/components/ui/misc";
 import { todayIso } from "@/lib/dates";
 import { cn } from "@/lib/cn";
 import type { CandidateDTO } from "@/server/queries/dto";
-import { deleteCandidateAction } from "@/server/actions/correction-actions";
+import {
+  deleteCandidateAction,
+  unarchiveCandidateAction,
+} from "@/server/actions/correction-actions";
 import { createCandidateAction, updateCandidateAction } from "@/server/actions/candidate-actions";
 
 const STATUS_TONE: Record<CandidateStatus, BadgeTone> = {
@@ -37,9 +40,11 @@ const STATUS_TONE: Record<CandidateStatus, BadgeTone> = {
 
 export function CandidatesView({
   candidates,
+  archived,
   stats,
 }: {
   candidates: CandidateDTO[];
+  archived: CandidateDTO[];
   stats: (TicketGroupStats & { status: CandidateStatus })[];
 }) {
   const f = useFormat();
@@ -202,7 +207,73 @@ export function CandidatesView({
           />
         ) : null}
       </Dialog>
+      {archived.length > 0 ? <ArchivedCandidates archived={archived} /> : null}
     </div>
+  );
+}
+
+/** Archived candidates, each with an explicit (confirmed, audited, undoable) Unarchive. */
+function ArchivedCandidates({ archived }: { archived: CandidateDTO[] }) {
+  const f = useFormat();
+  const { notifyMutation, workspace } = useUi();
+  const [pending, startTransition] = useTransition();
+  const [target, setTarget] = useState<CandidateDTO | null>(null);
+  const confirm = () =>
+    startTransition(async () => {
+      if (!target) return;
+      const result = await unarchiveCandidateAction(workspace, { id: target.id });
+      if (result.ok) {
+        toast.success(`Unarchived candidate ${result.data}`);
+        setTarget(null);
+        notifyMutation();
+      } else toast.error(result.message);
+    });
+  return (
+    <Card>
+      <details>
+        <summary className="cursor-pointer px-4 py-3 text-sm text-fg-muted select-none">
+          Archived candidates ({archived.length})
+        </summary>
+        <ul className="divide-y divide-border border-t border-border">
+          {archived.map((c) => (
+            <li key={c.id} className="flex items-center justify-between gap-3 px-4 py-2 text-sm">
+              <span className="min-w-0">
+                <span className="block truncate">{c.eventName}</span>
+                <span className="text-xs text-fg-subtle">
+                  {f.day(c.eventDate)} · {c.selection} @{f.odds(c.oddsObservedBp)} ·{" "}
+                  {c.protocolStatus}
+                </span>
+              </span>
+              <Button size="sm" variant="ghost" onClick={() => setTarget(c)} disabled={pending}>
+                <ArchiveRestore /> Unarchive
+              </Button>
+            </li>
+          ))}
+        </ul>
+      </details>
+      <Dialog
+        open={target !== null}
+        onOpenChange={(open) => (!open ? setTarget(null) : undefined)}
+        title="Unarchive candidate?"
+        description={target ? `${target.eventName} · ${target.selection}` : undefined}
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setTarget(null)}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={confirm} disabled={pending}>
+              Unarchive
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-fg-muted">
+          The candidate returns to the shadow portfolio and its statistics. A snapshot is taken
+          first, so this can be undone.
+        </p>
+      </Dialog>
+    </Card>
   );
 }
 

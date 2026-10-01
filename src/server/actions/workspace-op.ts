@@ -23,17 +23,18 @@ export function refreshAll(): void {
 }
 
 /**
- * Apply a state operation atomically (load → apply on a copy → validate → atomic write).
- * `undoable` snapshots the previous state first and records the change for Undo.
+ * Apply a state operation atomically (load → apply on a copy → validate → snapshot of the
+ * previous state → atomic write). Every mutation is labelled: the label names the snapshot,
+ * becomes the Undo target ("Last change") and enters the workspace change log.
  */
 export function mutateAction<T>(
   workspace: unknown,
   fn: (state: WorkspaceState, ctx: OpContext) => T,
-  undoable?: string | ((result: T) => string),
+  label: string | ((result: T) => string),
 ): Promise<ActionResult<T>> {
   return runAction(async () => {
     const ws = requireWorkspace(workspace);
-    const result = await getRepository().mutate(ws, fn, { undoable });
+    const result = await getRepository().mutate(ws, fn, { label });
     refreshAll();
     return result;
   });

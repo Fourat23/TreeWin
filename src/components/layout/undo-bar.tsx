@@ -8,7 +8,10 @@ import { useUi } from "@/components/providers/ui-provider";
 import { Button } from "@/components/ui/button";
 import { undoLastChangeAction } from "@/server/actions/workspace-actions";
 
-/** "Last change: … [Undo]" — restores the snapshot taken right before the last change. */
+/**
+ * "Last change: … [Undo]" — restores the state immediately before the latest persisted change.
+ * Every change has its own snapshot, so pressing Undo again walks back one change at a time.
+ */
 export function UndoBar() {
   const { workspace, lastChange, notifyMutation } = useUi();
   const f = useFormat();
@@ -16,13 +19,9 @@ export function UndoBar() {
   if (!lastChange) return null;
 
   const undo = () => {
-    const later =
-      lastChange.laterChanges > 0
-        ? `\n\n${lastChange.laterChanges} later change(s) will be reverted as well.`
-        : "";
     if (
       !window.confirm(
-        `Undo “${lastChange.label}”?${later}\n\nThe current state is snapshotted first, so this can be undone too.`,
+        `Undo “${lastChange.label}”?\n\nThe state just before this change is restored. The current state stays available in the backup history.`,
       )
     ) {
       return;

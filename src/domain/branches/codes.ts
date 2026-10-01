@@ -3,8 +3,9 @@
  *
  * Roots use letters (A, B, …, Z, AA, AB, …). Children append their 1-based rank:
  * a root's children are `A1`, `A2`; deeper levels use a dot: `A1.1`, `A1.2`, `A1.2.3`.
- * Roots never contain digits, so codes are unambiguous. Ranks are never reused, even
- * after a child dies, so a code identifies one branch forever. UUIDs stay internal.
+ * Roots never contain digits, so codes are unambiguous. Codes are never reused — not after a
+ * death, an archive, a correction or a permanent purge — so a code identifies one branch
+ * forever (the workspace keeps a registry of every code ever assigned). UUIDs stay internal.
  */
 
 const ROOT_CODE_RE = /^[A-Z]+$/;
@@ -38,6 +39,21 @@ export function isRootCode(code: string): boolean {
 export function childCode(parentCode: string, rank: number): string {
   if (!Number.isInteger(rank) || rank < 1) throw new RangeError("Child rank must be >= 1");
   return isRootCode(parentCode) ? `${parentCode}${rank}` : `${parentCode}.${rank}`;
+}
+
+/**
+ * Rank for the next child of `parentCode`: one above the highest rank ever reserved for a direct
+ * child of that parent (gaps left by removed children are never refilled).
+ */
+export function nextChildRank(parentCode: string, reservedCodes: Iterable<string>): number {
+  const prefix = isRootCode(parentCode) ? parentCode : `${parentCode}.`;
+  let max = 0;
+  for (const code of reservedCodes) {
+    if (!code.startsWith(prefix)) continue;
+    const rest = code.slice(prefix.length);
+    if (/^\d+$/.test(rest)) max = Math.max(max, Number(rest));
+  }
+  return max + 1;
 }
 
 /** Next root code: the one after the highest root code already used (gaps are never refilled). */

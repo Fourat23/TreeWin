@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { Workspace } from "@/domain/types";
 import { assertStateIntegrity, createEmptyState, StateIntegrityError } from "./integrity";
 import {
+  AUDIT_LOG_LIMIT,
   BACKUP_FORMAT,
   backupFileSchema,
   type BackupFile,
@@ -17,8 +18,10 @@ import {
  *   data/<workspace>/state.tmp         write-ahead copy, atomically renamed over state.json
  *   data/<workspace>/backups/*.json    automatic snapshots (rolling) + manual backups (kept)
  *
- * Every mutation runs through a per-workspace queue: load → (snapshot) → apply on a copy →
- * validate → atomic write. If anything fails, the previous state.json is left untouched.
+ * Every mutation runs through a per-workspace queue: load → apply on a copy → validate →
+ * snapshot of the previous state → atomic write. If anything fails, the previous state.json is
+ * left untouched. EVERY persisted mutation gets its own snapshot, so Undo always means
+ * "restore the state immediately before the latest change".
  */
 
 export interface MutationContext {
@@ -28,10 +31,10 @@ export interface MutationContext {
 
 export interface MutationOptions<T = unknown> {
   /**
-   * Make the change undoable: snapshot the previous state automatically and record this label
-   * (computed from the result if needed) as the workspace's "last change".
+   * Human label of the change (computed from the result if needed). It names the automatic
+   * snapshot, becomes the workspace's "last change" (the Undo target) and enters the change log.
    */
-  undoable?: string | ((result: T) => string);
+  label?: string | ((result: T) => string);
   now?: Date;
 }
 
@@ -55,9 +58,15 @@ export interface StateRepository {
   ): Promise<T>;
   backup(workspace: Workspace, reason: string, kind?: BackupKind): Promise<BackupInfo | null>;
   restore(workspace: Workspace, backupId: string, label?: string): Promise<void>;
+  /**
+   * Undo the latest persisted change: restore the snapshot taken right before it. The restored
+   * state keeps its own "last change", so repeated Undo walks back one change at a time. The
+   * undone state is kept as an automatic snapshot. Returns the undone label (null: nothing).
+   */
+  undo(workspace: Workspace): Promise<string | null>;
   listBackups(workspace: Workspace): Promise<BackupInfo[]>;
   readBackup(workspace: Workspace, backupId: string): Promise<BackupFile>;
-  /** Replace the whole state (import, reset), after an automatic snapshot. */
+  /** Replace the whole state (import, reset, demo seed), after an automatic snapshot. */
   replace(workspace: Workspace, next: WorkspaceState, reason: string): Promise<void>;
   paths(workspace: Workspace): { dir: string; state: string; backups: string };
 }
@@ -190,29 +199,9 @@ export class FileStateRepository implements StateRepository {
       const draft = structuredClone(current) as WorkspaceState;
       // Any exception here leaves state.json untouched (the draft is simply dropped).
       const result = fn(draft, { workspace, now });
-      draft.metadata.mutationCount += 1;
-      draft.strategyVersion = draft.settings.strategyVersion;
-      draft.savedAt = now.toISOString();
-      if (options.undoable) {
-        const label =
-          typeof options.undoable === "function" ? options.undoable(result) : options.undoable;
-        // Validate first so a rejected change never leaves a useless snapshot behind.
-        assertStateIntegrity(draft, workspace);
-        const snapshot = await this.writeBackup(
-          workspace,
-          current,
-          `Before: ${label}`,
-          "AUTO",
-          now,
-        );
-        draft.metadata.lastChange = {
-          label,
-          backupId: snapshot.id,
-          at: now.getTime(),
-          mutationCount: draft.metadata.mutationCount,
-        };
-      }
-      await this.save(workspace, draft);
+      const label =
+        typeof options.label === "function" ? options.label(result) : (options.label ?? "Change");
+      await this.commit(workspace, current, draft, label, now);
       return result;
     });
   }
@@ -220,27 +209,8 @@ export class FileStateRepository implements StateRepository {
   replace(workspace: Workspace, next: WorkspaceState, reason: string): Promise<void> {
     return this.enqueue(workspace, async () => {
       const now = new Date();
-      const snapshot = (await this.exists(workspace))
-        ? await this.writeBackup(
-            workspace,
-            await this.load(workspace),
-            `Before: ${reason}`,
-            "AUTO",
-            now,
-          )
-        : null;
-      const draft = structuredClone(next) as WorkspaceState;
-      draft.metadata.mutationCount += 1;
-      draft.metadata.lastChange = snapshot
-        ? {
-            label: reason,
-            backupId: snapshot.id,
-            at: now.getTime(),
-            mutationCount: draft.metadata.mutationCount,
-          }
-        : null;
-      draft.savedAt = now.toISOString();
-      await this.save(workspace, draft);
+      const current = await this.loadOrSetAside(workspace, now);
+      await this.commit(workspace, current, structuredClone(next) as WorkspaceState, reason, now);
     });
   }
 
@@ -255,44 +225,98 @@ export class FileStateRepository implements StateRepository {
     });
   }
 
+  /** Restoring a snapshot is itself a change: snapshotted first, logged, undoable. */
   restore(workspace: Workspace, backupId: string, label?: string): Promise<void> {
     return this.enqueue(workspace, async () => {
-      const backup = await this.readBackup(workspace, backupId);
-      if (backup.workspace !== workspace || backup.state.workspace !== workspace) {
-        throw new StateLoadError(workspace, backupId, [
-          "This snapshot belongs to another workspace",
+      const backup = await this.readSameWorkspaceBackup(workspace, backupId);
+      const now = new Date();
+      const current = await this.loadOrSetAside(workspace, now);
+      const draft = structuredClone(backup.state) as WorkspaceState;
+      await this.commit(workspace, current, draft, label ?? `Restored snapshot ${backupId}`, now);
+    });
+  }
+
+  undo(workspace: Workspace): Promise<string | null> {
+    return this.enqueue(workspace, async () => {
+      const current = await this.load(workspace);
+      const change = current.metadata.lastChange;
+      if (!change) return null;
+      let backup: BackupFile;
+      try {
+        backup = await this.readSameWorkspaceBackup(workspace, change.backupId);
+      } catch {
+        throw new StateLoadError(workspace, change.backupId, [
+          "The snapshot of this change is no longer available (retention limit)",
         ]);
       }
       const now = new Date();
-      // Restoring is itself undoable: snapshot the current state first. A current file that
-      // fails validation is kept aside (never deleted) so a snapshot can still be restored.
-      let current: WorkspaceState | null = null;
-      if (await this.exists(workspace)) {
-        try {
-          current = await this.load(workspace);
-        } catch (error) {
-          if (!(error instanceof StateLoadError)) throw error;
-          const { dir, state: file } = this.paths(workspace);
-          await fs.rename(file, join(dir, `state.rejected-${stamp(now)}.json`));
-          this.cache.delete(workspace);
-        }
-      }
-      const before = current
-        ? await this.writeBackup(workspace, current, `Before restoring ${backupId}`, "AUTO", now)
-        : null;
+      // The undone state stays recoverable from the backup history, without becoming the next
+      // Undo target (otherwise a second Undo would redo instead of going further back).
+      await this.writeBackup(workspace, current, `Before undo: ${change.label}`, "AUTO", now);
       const draft = structuredClone(backup.state) as WorkspaceState;
-      draft.metadata.mutationCount = (current?.metadata.mutationCount ?? 0) + 1;
-      draft.metadata.lastChange = before
-        ? {
-            label: label ?? `Restored snapshot ${backupId}`,
-            backupId: before.id,
-            at: now.getTime(),
-            mutationCount: draft.metadata.mutationCount,
-          }
-        : null;
+      draft.metadata.mutationCount = current.metadata.mutationCount + 1;
+      appendAudit(draft, now, `Undo: ${change.label}`);
       draft.savedAt = now.toISOString();
       await this.save(workspace, draft);
+      return change.label;
     });
+  }
+
+  /**
+   * Stamp `draft` as the latest change and write it: validate first (a rejected change never
+   * leaves a snapshot behind), snapshot `previous` (the Undo target), then write atomically.
+   */
+  private async commit(
+    workspace: Workspace,
+    previous: WorkspaceState | null,
+    draft: WorkspaceState,
+    label: string,
+    now: Date,
+  ): Promise<void> {
+    draft.metadata.mutationCount =
+      Math.max(previous?.metadata.mutationCount ?? 0, draft.metadata.mutationCount) + 1;
+    draft.strategyVersion = draft.settings.strategyVersion;
+    draft.savedAt = now.toISOString();
+    appendAudit(draft, now, label);
+    assertStateIntegrity(draft, workspace);
+    draft.metadata.lastChange = null;
+    if (previous) {
+      const snapshot = await this.writeBackup(workspace, previous, `Before: ${label}`, "AUTO", now);
+      draft.metadata.lastChange = {
+        label,
+        backupId: snapshot.id,
+        at: now.getTime(),
+        mutationCount: draft.metadata.mutationCount,
+      };
+    }
+    await this.save(workspace, draft);
+  }
+
+  /**
+   * Current state for a whole-state change. A file that fails validation is moved aside (never
+   * deleted) so a snapshot or an import can still replace it; there is then nothing to snapshot.
+   */
+  private async loadOrSetAside(workspace: Workspace, now: Date): Promise<WorkspaceState | null> {
+    try {
+      return await this.load(workspace);
+    } catch (error) {
+      if (!(error instanceof StateLoadError)) throw error;
+      const { dir, state: file } = this.paths(workspace);
+      await fs.rename(file, join(dir, `state.rejected-${stamp(now)}.json`));
+      this.cache.delete(workspace);
+      return null;
+    }
+  }
+
+  private async readSameWorkspaceBackup(
+    workspace: Workspace,
+    backupId: string,
+  ): Promise<BackupFile> {
+    const backup = await this.readBackup(workspace, backupId);
+    if (backup.workspace !== workspace || backup.state.workspace !== workspace) {
+      throw new StateLoadError(workspace, backupId, ["This snapshot belongs to another workspace"]);
+    }
+    return backup;
   }
 
   async readBackup(workspace: Workspace, backupId: string): Promise<BackupFile> {
@@ -390,6 +414,10 @@ export class FileStateRepository implements StateRepository {
     for (const name of automatic.slice(0, Math.max(0, excess)))
       await fs.rm(join(dir, name), { force: true });
   }
+}
+
+function appendAudit(state: WorkspaceState, now: Date, label: string): void {
+  state.auditLog = [...state.auditLog, { at: now.getTime(), label }].slice(-AUDIT_LOG_LIMIT);
 }
 
 async function fileExists(path: string): Promise<boolean> {

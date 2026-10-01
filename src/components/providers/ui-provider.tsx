@@ -25,8 +25,6 @@ export interface StrategyHints {
 export interface LastChangeInfo {
   label: string;
   at: number;
-  /** Changes made after it (an undo restores the snapshot, reverting them too). */
-  laterChanges: number;
 }
 
 interface NewTicketRequest {

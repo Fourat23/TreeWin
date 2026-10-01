@@ -224,7 +224,10 @@ export function TicketDetailView({ detail }: { detail: TicketDetailDTO }) {
               {detail.bankTransactions.map((t) => (
                 <p key={t.id} className="flex items-center justify-between gap-2">
                   <span className="flex items-center gap-2 text-fg-muted">
-                    <Landmark className="size-4" /> BANK · {DESTINATION_LABEL[t.destination]}
+                    <Landmark className="size-4" /> BANK · {DESTINATION_LABEL[t.destination]} ·{" "}
+                    {t.status === "WITHDRAWN" && t.withdrawnAt
+                      ? `withdrawn on ${f.date(t.withdrawnAt)}`
+                      : "secured"}
                   </span>
                   <span className="num font-medium">
                     {f.money(t.amountCents, { signed: true })}

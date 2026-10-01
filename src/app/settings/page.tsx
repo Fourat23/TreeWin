@@ -72,6 +72,7 @@ export default async function SettingsPage() {
                 tickets: a.bets.length,
                 bankCents: a.bankTransactions.reduce((s, t) => s + t.amountCents, 0),
               }))}
+            changeLog={[...state.auditLog].reverse().slice(0, 30)}
             history={[...state.settingsHistory]
               .reverse()
               .slice(0, 8)
