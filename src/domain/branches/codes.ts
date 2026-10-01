@@ -8,7 +8,6 @@
  */
 
 const ROOT_CODE_RE = /^[A-Z]+$/;
-const BRANCH_CODE_RE = /^[A-Z]+(\d+(\.\d+)*)?$/;
 
 /** 0 → "A", 25 → "Z", 26 → "AA", 27 → "AB" (bijective base-26). */
 export function rootCode(index: number): string {
@@ -33,10 +32,6 @@ export function rootIndex(code: string): number {
 
 export function isRootCode(code: string): boolean {
   return ROOT_CODE_RE.test(code);
-}
-
-export function isValidBranchCode(code: string): boolean {
-  return BRANCH_CODE_RE.test(code);
 }
 
 /** Code of the `rank`-th child (1-based) of `parentCode`. */

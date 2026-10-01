@@ -9,11 +9,6 @@ export type Profile = (typeof PROFILES)[number];
 export const BRANCH_STATUSES = ["ACTIVE", "MATURE", "DEAD", "PAUSED"] as const;
 export type BranchStatus = (typeof BRANCH_STATUSES)[number];
 
-/** Statuses that are still part of the living ecosystem (capital at risk). */
-export const ALIVE_STATUSES: readonly BranchStatus[] = ["ACTIVE", "MATURE", "PAUSED"];
-/** Statuses allowed to open a new round. */
-export const PLAYABLE_STATUSES: readonly BranchStatus[] = ["ACTIVE", "MATURE"];
-
 export const BET_RESULTS = ["PENDING", "WON", "LOST", "VOID"] as const;
 export type BetResult = (typeof BET_RESULTS)[number];
 
@@ -59,7 +54,6 @@ export const BIRTH_REASONS = ["ROOT", "P1", "THRESHOLD", "MATURE_PROFIT"] as con
 export type BirthReason = (typeof BIRTH_REASONS)[number];
 
 export const BOOKMAKER = "WINAMAX" as const;
-export type Bookmaker = typeof BOOKMAKER;
 
 export const TRISTATE_VALUES = ["TRUE", "FALSE", "UNKNOWN"] as const;
 export type Tristate = (typeof TRISTATE_VALUES)[number];
@@ -83,10 +77,6 @@ export type ChecklistItem = (typeof CHECKLIST_ITEMS)[number];
 export type Checklist = Partial<Record<ChecklistItem, Tristate>>;
 
 export type ProfileRecord<T> = Record<Profile, T>;
-
-export function isAlive(status: BranchStatus): boolean {
-  return status !== "DEAD";
-}
 
 export function isPlayable(status: BranchStatus): boolean {
   return status === "ACTIVE" || status === "MATURE";

@@ -232,9 +232,7 @@ export const settingsHistory = sqliteTable("settings_history", {
 });
 
 export type BranchRow = typeof branches.$inferSelect;
-export type NewBranchRow = typeof branches.$inferInsert;
 export type BetRow = typeof bets.$inferSelect;
-export type NewBetRow = typeof bets.$inferInsert;
 export type BankTransactionRow = typeof bankTransactions.$inferSelect;
 export type BranchEventRow = typeof branchEvents.$inferSelect;
 export type NewBranchEventRow = typeof branchEvents.$inferInsert;

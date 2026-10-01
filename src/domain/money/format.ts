@@ -87,8 +87,3 @@ export function formatBp(
   );
   return formatter.format(bp / BP_SCALE);
 }
-
-/** Ratio (0..1 float) → "54.5 %". */
-export function formatRatio(ratio: number, locale = DEFAULT_LOCALE, digits = 1): string {
-  return formatBp(ratio * BP_SCALE, { locale, digits });
-}

@@ -23,10 +23,6 @@ export const CENTS_PER_UNIT = 100;
 export const ODDS_SCALE = 10_000;
 export const BP_SCALE = 10_000;
 
-export function isCents(value: unknown): value is Cents {
-  return typeof value === "number" && Number.isSafeInteger(value);
-}
-
 export function assertCents(value: number, label = "amount"): asserts value is Cents {
   if (!Number.isSafeInteger(value)) {
     throw new RangeError(`${label} must be an integer number of cents, received ${value}`);
@@ -82,13 +78,6 @@ export function roundMoney(cents: number): Cents {
   return rounded === 0 ? 0 : rounded;
 }
 
-export function sumCents(values: readonly Cents[]): Cents {
-  let total = 0;
-  for (const v of values) total += v;
-  assertCents(total, "sum");
-  return total;
-}
-
 const DECIMAL_RE = /^([+-])?(\d+)(?:[.,](\d*))?$/;
 
 /**
@@ -99,7 +88,7 @@ const DECIMAL_RE = /^([+-])?(\d+)(?:[.,](\d*))?$/;
 export function parseScaledDecimal(input: string, decimals: number): number | null {
   const cleaned = input
     .trim()
-    .replace(/[€$£\s  ']/g, "")
+    .replace(/[€$£\s\u00a0\u202f']/g, "")
     .replace(/^\+/, "");
   if (cleaned === "") return null;
   // Accept a thousands separator only when a different decimal separator is also present.
@@ -139,15 +128,6 @@ export function parsePercent(input: string): Bp | null {
   return parseScaledDecimal(input.replace(/%/g, ""), 2);
 }
 
-export function eurosToCents(euros: number): Cents {
-  return roundMoney(euros * CENTS_PER_UNIT);
-}
-
-/** Convert cents to a JS number of currency units. Display / charting only. */
-export function centsToUnits(cents: Cents): number {
-  return cents / CENTS_PER_UNIT;
-}
-
 /** Plain decimal string with a dot separator, e.g. 28561 → "285.61". For CSV and inputs. */
 export function centsToDecimalString(cents: Cents): string {
   assertCents(cents);
@@ -156,10 +136,6 @@ export function centsToDecimalString(cents: Cents): string {
   const units = Math.trunc(abs / 100);
   const rest = String(abs % 100).padStart(2, "0");
   return `${negative ? "-" : ""}${units}.${rest}`;
-}
-
-export function oddsToNumber(oddsBp: OddsBp): number {
-  return oddsBp / ODDS_SCALE;
 }
 
 /** Odds basis points → "1.30". Uses 2 decimals unless more precision is present. */

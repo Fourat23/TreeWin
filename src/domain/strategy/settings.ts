@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { BP_SCALE } from "../money";
-import { PROFILES, type Profile } from "../types";
+import type { Profile } from "../types";
 
 /**
  * Centralised, versioned strategy configuration.
@@ -15,8 +15,6 @@ const share = z.int().min(0).max(BP_SCALE);
 const cents = z.int().min(0).max(100_000_000_000);
 
 export const P1_TRIGGERS = ["TARGET_PATH", "CAPITAL_MULTIPLE", "WIN_COUNT"] as const;
-export type P1Trigger = (typeof P1_TRIGGERS)[number];
-
 export const CHILD_PROFILE_ASSIGNMENTS = ["QUOTA", "RANDOM", "INHERIT"] as const;
 export type ChildProfileAssignment = (typeof CHILD_PROFILE_ASSIGNMENTS)[number];
 
@@ -108,7 +106,6 @@ export const strategySettingsSchema = z
   .strict();
 
 export type StrategySettings = z.infer<typeof strategySettingsSchema>;
-export type P1Settings = StrategySettings["p1"];
 
 export const DEFAULT_SETTINGS: StrategySettings = {
   currency: "EUR",
@@ -183,9 +180,3 @@ export function parseStoredSettings(stored: unknown): StrategySettings {
 export function getProfileRules(settings: StrategySettings, profile: Profile): ProfileRules {
   return settings.profiles[profile];
 }
-
-export function keepShareBp(rules: Pick<ProfileRules, "bankShareBp" | "childShareBp">): number {
-  return BP_SCALE - rules.bankShareBp - rules.childShareBp;
-}
-
-export const PROFILE_ORDER: readonly Profile[] = PROFILES;

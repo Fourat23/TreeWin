@@ -67,6 +67,8 @@ export interface EngineContext {
   childProfileOverrides?: readonly (Profile | null | undefined)[];
   /** RNG in [0, 1) for RANDOM assignment. Defaults to Math.random. */
   random?: () => number;
+  /** Skip human-readable descriptions (Monte Carlo runs evaluate millions of rounds). */
+  quiet?: boolean;
 }
 
 export interface PlannedEvent {
@@ -185,6 +187,7 @@ class PlanBuilder {
   }
 
   money(cents: Cents, signed = false): string {
+    if (this.ctx.quiet) return "";
     return formatMoney(cents, {
       locale: this.settings.locale,
       currency: this.settings.currency,

@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useUi } from "@/components/providers/ui-provider";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/misc";
@@ -57,11 +57,8 @@ const NAV: { section: string; items: { href: string; label: string; icon: typeof
     },
   ];
 
-function ThemeToggle() {
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
-  useEffect(() => {
-    setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
-  }, []);
+function ThemeToggle({ initialTheme }: { initialTheme: "dark" | "light" }) {
+  const [theme, setTheme] = useState(initialTheme);
   const toggle = () => {
     const next = theme === "dark" ? "light" : "dark";
     setTheme(next);
@@ -119,12 +116,19 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({
+  children,
+  initialTheme,
+}: {
+  children: ReactNode;
+  initialTheme: "dark" | "light";
+}) {
   const { openNewTicket, openPalette } = useUi();
-  const [mobileOpen, setMobileOpen] = useState(false);
   const pathname = usePathname();
-
-  useEffect(() => setMobileOpen(false), [pathname]);
+  // The mobile menu belongs to the page it was opened on: navigating closes it.
+  const [menuOpenedAt, setMenuOpenedAt] = useState<string | null>(null);
+  const mobileOpen = menuOpenedAt === pathname;
+  const setMobileOpen = (open: boolean) => setMenuOpenedAt(open ? pathname : null);
 
   return (
     <div className="min-h-dvh">
@@ -162,7 +166,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             <Settings className="size-4" /> Settings
           </Link>
-          <ThemeToggle />
+          <ThemeToggle initialTheme={initialTheme} />
         </div>
         <p className="mt-3 px-2 text-[10px] leading-relaxed text-fg-subtle">
           Local tracker. Tickets are placed manually on Winamax — nothing is ever automated.
@@ -188,7 +192,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Button
             variant="ghost"
             size="icon-sm"
-            onClick={() => setMobileOpen((v) => !v)}
+            onClick={() => setMobileOpen(!mobileOpen)}
             aria-label="Menu"
             aria-expanded={mobileOpen}
           >
@@ -203,7 +207,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Link href="/settings" className="flex items-center gap-2 text-sm text-fg-muted">
               <Settings className="size-4" /> Settings
             </Link>
-            <ThemeToggle />
+            <ThemeToggle initialTheme={initialTheme} />
           </div>
         </div>
       ) : null}

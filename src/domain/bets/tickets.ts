@@ -137,7 +137,6 @@ export const createTicketSchema = ticketDetailsSchema.extend({
 });
 
 export type CreateTicketInput = z.input<typeof createTicketSchema>;
-export type CreateTicketData = z.output<typeof createTicketSchema>;
 
 export const updateTicketDetailsSchema = ticketDetailsSchema.partial().extend({
   betId: z.string().min(1),

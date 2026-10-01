@@ -7,6 +7,7 @@ import {
   Landmark,
   ListTree,
   MoreHorizontal,
+  NotebookPen,
   Pause,
   PenLine,
   Play,
@@ -189,6 +190,9 @@ function BranchHeader({
               <MenuSeparator />
               <MenuItem onSelect={() => onDialog("adjust")} disabled={Boolean(detail.pendingBetId)}>
                 <PenLine /> Manual adjustment…
+              </MenuItem>
+              <MenuItem onSelect={() => onDialog("notes")}>
+                <NotebookPen /> Edit notes…
               </MenuItem>
               <MenuItem onSelect={() => onDialog("profile")}>
                 <Tag /> Change profile (exceptional)…

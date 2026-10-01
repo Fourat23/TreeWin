@@ -22,7 +22,6 @@ export const TICKET_SORTS = [
   "branch",
 ] as const;
 export const TICKET_STATUSES = [...BET_RESULTS, "CANCELLED"] as const;
-export type TicketStatusFilter = (typeof TICKET_STATUSES)[number];
 
 /** Filters read from the URL; invalid values are dropped instead of failing the page. */
 export const ticketFiltersSchema = z.object({

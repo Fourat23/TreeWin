@@ -52,7 +52,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
                 defaultProfile: "BALANCED",
               }}
             >
-              <AppShell>{children}</AppShell>
+              <AppShell initialTheme={theme}>{children}</AppShell>
             </UiProvider>
           </TooltipProvider>
           <Toaster

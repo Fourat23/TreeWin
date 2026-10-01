@@ -75,6 +75,8 @@ interface HoverState {
   branch: BranchSummaryDTO;
   x: number;
   y: number;
+  /** Container width at hover time, to keep the tooltip inside the canvas. */
+  width: number;
 }
 
 function TreeCanvas({ branches: liveBranches }: { branches: BranchSummaryDTO[] }) {
@@ -274,6 +276,7 @@ function TreeCanvas({ branches: liveBranches }: { branches: BranchSummaryDTO[] }
             branch: (node as BranchFlowNode).data.branch,
             x: event.clientX - (rect?.left ?? 0),
             y: event.clientY - (rect?.top ?? 0),
+            width: rect?.width ?? 800,
           });
         }}
         onNodeMouseLeave={() => setHover(null)}
@@ -403,7 +406,7 @@ function TreeCanvas({ branches: liveBranches }: { branches: BranchSummaryDTO[] }
         <div
           className="pointer-events-none absolute z-20 hidden w-56 rounded-xl border border-border bg-surface-3 p-3 text-xs shadow-panel md:block"
           style={{
-            left: Math.min(hover.x + 16, (containerRef.current?.clientWidth ?? 800) - 240),
+            left: Math.min(hover.x + 16, hover.width - 240),
             top: hover.y + 16,
           }}
           role="tooltip"

@@ -9,7 +9,7 @@ import { useUi } from "@/components/providers/ui-provider";
 import { AmountInput } from "@/components/ui/amount-input";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Field, Input, Select } from "@/components/ui/field";
+import { Field, Input, Select, Textarea } from "@/components/ui/field";
 import { PROFILE_LABEL } from "@/lib/labels";
 import type { BranchSummaryDTO } from "@/server/queries/dto";
 import {
@@ -17,9 +17,12 @@ import {
   changeBranchProfileAction,
   setBranchPausedAction,
   transferToBankAction,
+  updateBranchNotesAction,
 } from "@/server/actions/branch-actions";
 
-export type BranchDialogKind = "adjust" | "bank" | "profile" | "pause" | null;
+type BranchWithNotes = BranchSummaryDTO & { notes: string | null };
+
+export type BranchDialogKind = "adjust" | "bank" | "profile" | "pause" | "notes" | null;
 
 /** Exceptional, journaled operations on a branch. */
 export function BranchActionDialogs({
@@ -27,7 +30,7 @@ export function BranchActionDialogs({
   kind,
   onClose,
 }: {
-  branch: BranchSummaryDTO;
+  branch: BranchWithNotes;
   kind: BranchDialogKind;
   onClose: () => void;
 }) {
@@ -36,6 +39,7 @@ export function BranchActionDialogs({
     bank: `Secure capital to BANK — ${branch.code}`,
     profile: `Change profile — ${branch.code}`,
     pause: branch.status === "PAUSED" ? `Resume ${branch.code}` : `Pause ${branch.code}`,
+    notes: `Notes — ${branch.code}`,
   };
   return (
     <Dialog
@@ -54,7 +58,7 @@ function ActionForm({
   kind,
   onDone,
 }: {
-  branch: BranchSummaryDTO;
+  branch: BranchWithNotes;
   kind: Exclude<BranchDialogKind, null>;
   onDone: () => void;
 }) {
@@ -67,6 +71,7 @@ function ActionForm({
     branch.profile === "HARVEST" ? "BALANCED" : "HARVEST",
   );
   const [applyCap, setApplyCap] = useState(false);
+  const [notes, setNotes] = useState(branch.notes ?? "");
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
@@ -95,6 +100,8 @@ function ActionForm({
           reason,
           applyProfileCap: applyCap,
         });
+      } else if (kind === "notes") {
+        result = await updateBranchNotesAction({ branchId: branch.id, notes });
       } else {
         result = await setBranchPausedAction({
           branchId: branch.id,
@@ -106,7 +113,7 @@ function ActionForm({
         setError(result.message);
         return;
       }
-      toast.success("Saved and journaled");
+      toast.success(kind === "notes" ? "Notes saved" : "Saved and journaled");
       notifyMutation();
       onDone();
     });
@@ -201,9 +208,17 @@ function ActionForm({
             : "A paused branch keeps its capital but cannot open new rounds. No-bet days are never a problem — pausing is optional."}
         </p>
       ) : null}
-      <Field label={kind === "pause" ? "Reason (optional)" : "Reason (journaled)"}>
-        {(p) => <Input {...p} value={reason} onChange={(e) => setReason(e.target.value)} />}
-      </Field>
+      {kind === "notes" ? (
+        <Field label="Notes">
+          {(p) => (
+            <Textarea {...p} rows={6} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          )}
+        </Field>
+      ) : (
+        <Field label={kind === "pause" ? "Reason (optional)" : "Reason (journaled)"}>
+          {(p) => <Input {...p} value={reason} onChange={(e) => setReason(e.target.value)} />}
+        </Field>
+      )}
       {error ? <p className="text-sm text-critical">{error}</p> : null}
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={onDone}>

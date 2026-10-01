@@ -104,7 +104,7 @@ describe("formatting", () => {
   });
 
   it("formats money in the configured locale", () => {
-    const normalize = (s: string) => s.replace(/[  ]/g, " ");
+    const normalize = (s: string) => s.replace(/[\u00a0\u202f]/g, " ");
     expect(normalize(formatMoney(28_561))).toBe("285,61 €");
     expect(normalize(formatMoney(482_000))).toBe("4 820,00 €");
     expect(normalize(formatMoney(6_591, { signed: true }))).toBe("+65,91 €");

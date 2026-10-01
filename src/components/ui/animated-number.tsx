@@ -26,14 +26,10 @@ export function AnimatedNumber({
     previous.current = value;
     if (from === value) return;
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduced) {
-      setDisplay(value);
-      return;
-    }
     let frame = 0;
     const start = performance.now();
     const tick = (now: number) => {
-      const t = Math.min(1, (now - start) / durationMs);
+      const t = reduced ? 1 : Math.min(1, (now - start) / durationMs);
       const eased = 1 - (1 - t) ** 3;
       setDisplay(Math.round(from + (value - from) * eased));
       if (t < 1) frame = requestAnimationFrame(tick);
